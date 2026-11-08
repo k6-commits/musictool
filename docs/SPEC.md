@@ -1,6 +1,7 @@
-# musictool 仕様書（ドラフト v0.1）
+# musictool 仕様書（ドラフト v0.2）
 
 - 作成日: 2026-11-08
+- 更新: v0.2 で DAW 連携（8 章）を追加
 - ステータス: たたき台（要レビュー）
 - 関連: [調査メモ（2026年11月）](research/2026-11-voice-to-midi-trends.md)
 
@@ -23,6 +24,7 @@
 3. **表現を捨てない**: しゃくり・ビブラートをピッチベンド / MPE として残すオプション
 4. **端末内処理**: オフラインで動き、音声を外に出さない
 5. **日本語ユーザー向け**: ドレミ表記・移動ド、中央ドの C3 / C4 表記切り替え
+6. **DAW とつながる**: ファイル渡し → リアルタイム MIDI → DAW プラグインの 3 段階で連携する（8 章）
 
 ---
 
@@ -39,7 +41,9 @@
 | UC1 | 思いついたフレーズを録って、そのまま MIDI で書き出す（起動から 30 秒以内に完了） | MVP |
 | UC2 | 録ったメロディを直して、楽器を変えて聴く | MVP |
 | UC3 | メロディにコード・ベース・ドラムを付けて、ラフな伴奏まで作る | Phase 2 |
-| UC4 | PC の DAW に MIDI コントローラーとして、声でリアルタイム入力する | Phase 3 |
+| UC4 | PC の DAW に、声でリアルタイムに MIDI を入力する | Phase 2（PC ブラウザ）/ Phase 3（ネイティブ・プラグイン） |
+| UC5 | DAW の曲を流しながら歌い、小節位置どおりの MIDI を DAW に入れる | Phase 2 |
+| UC6 | DAW の中で、録音済みのボーカルトラックから MIDI を起こす | Phase 3（プラグイン） |
 
 ---
 
@@ -56,6 +60,7 @@
 | 「AI に作らせない」・プライバシー訴求 | Nada は生成 AI 不使用を明言、HumTrack は録音を学習に使わないと明言 | **採用**: メロディは必ずユーザーのもの。録音を学習に使わない |
 | 声→楽器の音色変換 | DDSP / RAVE / Neutone Morpho | Phase 3 の実験機能 |
 | ビートボックス→ドラム | Dubler 2、TRIA（2025） | Phase 2。**特許調査が前提** |
+| DAW 連携の土台が整った | VST3 SDK が MIT ライセンスに（2025-10）、ARA SDK は Apache-2.0、CLAP の普及、DAW 共通形式 DAWproject、Windows が仮想 MIDI ポートを標準搭載、Ableton Link Audio（2026） | **8 章の 3 段階で対応** |
 
 ---
 
@@ -74,9 +79,10 @@
 | F-07 | クオンタイズ | グリッド 1/4〜1/32（3 連符あり）、強さ 0〜100%、スイング |
 | F-08 | ピアノロール編集 | ノート上に音名を表示。移動 / 長さ変更 / 分割 / 結合 / 削除 / 追加。元の声のピッチ曲線を背景に重ねる。信頼度の低いノートに「要確認」表示。ノート長押しでその区間の元の声を再生。元に戻す / やり直し |
 | F-09 | 再生 | 楽器選択（ピアノ / シンセリード / ストリングス / ベル / フルート / ベース）、元の声と楽器のバランス、ループ再生 |
-| F-10 | 書き出し | MIDI（.mid、SMF Type 1）、WAV、共有シート。DAW ごとの取り込み手順を表示 |
+| F-10 | 書き出し | MIDI（.mid、SMF Type 1）と、MIDI と頭をそろえた元の声の WAV。共有シート。DAW ごとの取り込み手順を表示（8 章） |
 | F-11 | プロジェクト保存 | 端末内に保存。一覧・名前変更・複製・削除。バックアップ書き出し（.zip） |
 | F-12 | 表記設定 | 音名: 英語（C D E）/ ドレミ（固定ド）/ 移動ド（キー基準）。中央ド: C4（標準）/ C3（ヤマハ式） |
+| F-13 | 書き出しフォルダ連携 | PC の Chrome / Edge で、指定したフォルダに直接保存する。そのフォルダを DAW のブラウザに登録しておけば、書き出した瞬間に DAW 側に出てくる |
 
 吸着とクオンタイズは**非破壊**とする。元の解析結果を残し、スライダーを戻せばいつでも元に戻る。手で直したノートは再解析やスライダー操作で上書きしない。
 
@@ -84,7 +90,7 @@
 
 - F-02: 静かな部屋で歌ったとき、入力から画面表示までの遅延が 50 ms 以下（目標）。定常音で音名表示がちらつかない
 - F-05: 30 秒の録音を中位スマホで 3 秒以内に解析する。精度は 9 章の目標を満たす
-- F-10: 書き出した .mid を GarageBand / Logic Pro / FL Studio / Ableton Live / Cubase / Studio One で開いて、テンポ・拍子・音程・長さが一致する
+- F-10: 書き出した .mid を GarageBand / Logic Pro / FL Studio / Ableton Live / Cubase / Studio One で開いて、テンポ・拍子・音程・長さが一致する。声の WAV と並べて位置がそろう
 
 ### 4.2 Phase 2
 
@@ -96,17 +102,23 @@
 | F-23 | マルチトラック・ハモり | 声メロを複数トラックに。キーに沿った 3 度 / 6 度のハモりを自動生成 |
 | F-24 | ビートボックス→ドラム | キック / スネア / ハイハットの 3 種類から始め、ユーザーごとに各 3 回録って登録する。**実装前に特許調査**（11 章） |
 | F-25 | テイク管理 | 複数テイクを録って、良いところをつなぐ |
+| F-26 | ライブ MIDI 出力 | PC ブラウザ（Chrome / Edge / Firefox）から、歌うそばから MIDI ノートとピッチベンドを DAW へ送る。仮想 MIDI ポート経由。「即応 ↔ 安定」スライダーつき（8.4 節） |
+| F-27 | DAW 同期録音 | DAW から MIDI クロックと再生位置を受け取り、DAW の曲に合わせて歌う。録ったノートは DAW の小節位置どおりに並ぶ |
+| F-28 | スマホをマイクに | スマホ（iPhone の Safari を含む）で歌い、同じ Wi-Fi の PC ブラウザへ WebRTC でノートを送り、PC から DAW へ MIDI を流す。QR コードでペアリング |
+| F-29 | DAWproject 書き出し | Bitwig / Studio One / Cubase へ、テンポ・MIDI・声の音声を 1 ファイルで渡す |
 
 ### 4.3 Phase 3
 
 | ID | 機能 | 内容 |
 |---|---|---|
 | F-30 | 表現付き書き出し | しゃくり・ビブラートをピッチベンド / MPE で書き出す |
-| F-31 | MIDI コントローラーモード | 声でリアルタイムに MIDI を出す（Web MIDI。Chrome / Edge / Firefox / Android Chrome。iOS Safari は非対応のためネイティブ版で対応） |
+| F-31 | ネイティブの MIDI 連携 | iOS / Android アプリから、仮想 MIDI ポート・ネットワーク MIDI・Bluetooth MIDI で DAW へ送る。Ableton Link / Link Audio でテンポと音声を共有（8.6 節） |
 | F-32 | AI アレンジ | 記号音楽モデル（MIDI-LLM など）で、メロディに合う伴奏や続きを生成。メロディ自体は変えない |
 | F-33 | 音色変換レンダリング | 声のニュアンスを残したまま楽器の音にする（DDSP / RAVE 系） |
-| F-34 | ネイティブ版 | iOS / Android アプリ化、AUv3、クラウド同期 |
+| F-34 | ネイティブ版 | iOS / Android アプリ化、クラウド同期 |
 | F-35 | AI チャット | 「サビを明るく」「ジャズっぽいコードに」などの指示で伴奏を変える |
+| F-36 | DAW プラグイン | VST3 / AU / CLAP（PC）、AUv3（iPad / iPhone）。ボーカルトラックに挿して解析し、MIDI クリップを DAW のトラックへドラッグ＆ドロップ、または MIDI 出力（8.5 節） |
+| F-37 | ARA 2 対応 | 対応 DAW で、タイムライン上の音声クリップを直接解析する（Melodyne と同じ方式） |
 
 ### 4.4 当面やらないこと
 
@@ -189,7 +201,7 @@
 | 優先 | エンジン | 理由 |
 |---|---|---|
 | 1 | SwiftF0（MIT、ONNX、16 kHz、16 ms 刻み、約 47〜2094 Hz、信頼度つき） | 小さく速く、雑音に強い。ブラウザでの動作実績あり |
-| 2 | PESTO（LGPL-3.0、ストリーミング対応、遅延 10 ms 未満） | さらに低遅延が必要な場合（MIDI コントローラーモードなど）。ライセンスに注意 |
+| 2 | PESTO（LGPL-3.0、ストリーミング対応、遅延 10 ms 未満） | さらに低遅延が必要な場合（ライブ MIDI 出力など）。ライセンスに注意 |
 | 3 | YIN / McLeod（純 DSP、AudioWorklet 内） | 低スペック端末向けと口笛モード |
 
 - 推論は ONNX Runtime Web（WASM）で Web Worker 上で実行する。WebGPU は対応ブラウザで任意に使う
@@ -308,7 +320,9 @@ interface Note {
 
 ---
 
-## 8. MIDI 書き出し仕様
+## 8. MIDI 書き出しと DAW 連携
+
+### 8.1 MIDI ファイル
 
 | 項目 | 内容 |
 |---|---|
@@ -317,6 +331,8 @@ interface Note {
 | トラック 1〜 | 各トラック名（FF 03）、Program Change、ノートオン / オフ、ベロシティ |
 | チャンネル | メロディ = ch1、ドラム = ch10 |
 | ファイル名 | `{プロジェクト名}_{YYYYMMDD-HHmm}.mid` |
+| 位置合わせ | カウントインを除き、1 小節目の頭を 0 にする。同時に書き出す声の WAV も同じ位置を 0 にするので、DAW で両方を 1 小節目に置けばそろう |
+| テンポ | フリーテンポ録音（F-20）では、推定したテンポの変化もテンポマップとして書く |
 
 音色と GM 番号の対応（1 始まり表記）:
 
@@ -335,6 +351,108 @@ interface Note {
 - **MPE**: MCM（RPN 6）でゾーンを設定し、1 音ごとにチャンネル 2〜16 を割り当てる。ベンド幅は ±48 半音
 - **MIDI 2.0 Clip File**: DAW の対応が広がったら追加する
 
+### 8.2 連携の 3 段階
+
+| レベル | 方法 | できること | 対応環境 | 段階 |
+|---|---|---|---|---|
+| 1. ファイル | MIDI と声の WAV を書き出して DAW に読み込む | 録ってから渡す。タイミングが最も正確 | すべての DAW・すべての端末 | MVP（DAWproject は Phase 2） |
+| 2. リアルタイム | Web MIDI で仮想 MIDI ポートへ送る。DAW からクロックを受ける | 歌うそばから DAW の音源が鳴る。DAW の曲に合わせて録れる | PC の Chrome / Edge / Firefox。スマホは PC 経由（F-28） | Phase 2 |
+| 3. プラグイン | DAW の中で動く VST3 / AU / CLAP / AUv3 | DAW 内のボーカルトラックから直接 MIDI を起こす | 主要 DAW（iPad の DAW を含む） | Phase 3 |
+
+### 8.3 レベル 1: ファイル連携
+
+- MIDI と声の WAV を同じ「0 地点」で書き出す（8.1 節）
+- DAW によってテンポ情報の読み込み方が違うので、DAW 別の取り込み手順をアプリ内に用意し、テンポの一致を検証項目にする（12 章）
+- 渡し方:
+  - スマホ: 共有シート（AirDrop、ファイルアプリ、Google ドライブなど）
+  - PC: 通常のダウンロードに加えて、書き出しフォルダ連携（F-13、File System Access API）
+- ブラウザから DAW へ直接ドラッグして書き出す方法（Chrome の `DownloadURL`）は、Chromium 限定で制約も多いので主手段にしない
+- DAWproject（F-29）: Bitwig（5.0.9 以降）、Studio One（6.5 以降）、Cubase（14 以降）などが対応する DAW 共通形式。テンポ・MIDI トラック・音声をまとめて渡せる。Ableton Live / Logic Pro / Pro Tools は未対応
+
+### 8.4 レベル 2: リアルタイム連携（Phase 2）
+
+**ライブ MIDI 出力（F-26）**
+
+- 仮想 MIDI ポートを経由して DAW に送る
+  - Mac: 標準の IAC Driver を有効にする（「Audio MIDI 設定」）
+  - Windows 11: Windows MIDI Services のループバック（`Default App Loopback (A)` / `(B)`）。ブラウザの Web MIDI からそのまま使える。古い環境では loopMIDI などを使う
+- Web MIDI は初回に許可ダイアログが出る（Chrome 124 以降）。SysEx は要求しない
+- ノートオンの判定: 同じ音程が一定時間（初期値 40 ms）続いたらノートオン。半音以上動いて一定時間続いたら次のノートへ。半音未満の揺れはピッチベンドで送る（ベンド幅 ±2 半音を RPN 0 で設定）
+- 「即応 ↔ 安定」スライダーで、上の判定時間を 15〜100 ms の範囲で調整する（短いほど速いが誤検出が増える）
+- 検出エンジンは低遅延の PESTO か DSP（YIN）を使う（6.2 節）
+- 検出に数十 ms かかるぶん、DAW には少し遅れて記録される。アプリに実測の遅延を表示し、DAW 側でずらす手順を案内する。タイミングの正確さが必要な場合はレベル 1（録ってから渡す）を勧める
+
+**DAW 同期録音（F-27）**
+
+- DAW から MIDI クロック（24 ppqn）、再生開始・停止、ソングポジションポインタを仮想ポート経由で受け取る
+- DAW の再生に合わせてアプリが録音を始め、録ったノートを DAW の小節位置に合わせて並べる。書き出した MIDI は、DAW の該当小節に置けばぴったり合う
+- 受信タイムスタンプでクロックの揺れをならす
+
+**スマホをマイクにする（F-28）**
+
+- PC ブラウザでアプリを開くと QR コードが出る。スマホで読み取ってペアリングする
+- スマホで音程を検出し、ノート情報だけを WebRTC のデータチャネルで PC に送る。PC が Web MIDI で DAW へ流す
+- iPhone の Safari は Web MIDI に非対応だが、この方式なら iPhone でも DAW を鳴らせる
+- 接続の確立にだけ小さなシグナリングサーバーが必要（音声はサーバーに送らない）
+
+### 8.5 レベル 3: DAW プラグイン（Phase 3）
+
+| 形式 | 主な DAW |
+|---|---|
+| VST3 | Cubase、Ableton Live、FL Studio、Studio One、Reaper、Bitwig など |
+| AU | Logic Pro、GarageBand（Mac） |
+| CLAP | Bitwig、Reaper、Studio One 7、FL Studio など |
+| AUv3 | Logic Pro for iPad、GarageBand（iOS）、Cubasis、AUM など |
+| AAX | Pro Tools（Avid の開発者契約と署名が必要なので後回し） |
+
+使い方:
+
+1. ボーカルトラックにプラグインを挿す（音はそのまま通す）。DAW を再生すると解析が進み、プラグイン画面のピアノロールにノートが出る
+2. DAW のテンポと再生位置はホストから受け取るので、ノートは最初から DAW の小節に合っている
+3. DAW へ渡す:
+   - **ドラッグ＆ドロップ**: プラグイン画面から MIDI クリップを DAW のトラックへドラッグする。全 DAW で使える共通の手段（NeuralNote と同じ方式）。WebView からはファイルをドラッグできないので、この部分はネイティブで実装する
+   - **MIDI 出力**: プラグインの MIDI 出力を別トラックの音源へ回す。別トラックで受けられるかは DAW ごとに違うので、受けられない DAW ではプラグインから仮想 MIDI ポートへ送る方式で代替する
+
+ARA 2（F-37）:
+
+- DAW を再生しなくても、タイムライン上の音声クリップ全体を直接解析できる（Melodyne と同じ方式）
+- 対応: Logic Pro、Cubase / Nuendo、Studio One、Reaper、Pro Tools、Cakewalk など
+- 非対応（2026 年時点）: Ableton Live、FL Studio（公式フォーラムで「ロードマップにある」と回答）、Bitwig
+- ARA SDK は Apache-2.0 で公開されている
+
+実装:
+
+- 解析コアは Web 版と共有する（8.7 節）。フレームワークは JUCE 8（または CLAP + clap-wrapper）、推論は ONNX Runtime
+- UI は JUCE 8 の WebView 機能で Web 版のピアノロールを再利用できる。ただし DAW 内での不安定さの報告もあるので、Phase 3 の最初に主要 DAW で検証し、だめならネイティブ UI にする
+- 参考実装: NeuralNote（Apache-2.0）。JUCE + ONNX Runtime + Basic Pitch で作られた音声→MIDI プラグインで、MIDI はドラッグ＆ドロップで書き出す
+- ライセンス（11 章）: VST3 SDK は 3.8（2025-10）から MIT になり、Steinberg との契約が不要。CLAP は MIT、ARA SDK は Apache-2.0。JUCE は商用ライセンス（年間売上 2 万ドルまで無料の Starter など）か AGPLv3
+
+### 8.6 ネイティブアプリでの連携（Phase 3、F-31）
+
+| 経路 | iOS | Android |
+|---|---|---|
+| 同じ端末の DAW へ | CoreMIDI の仮想 MIDI ポート、AUv3 | 仮想 MIDI デバイス（MidiDeviceService） |
+| PC の DAW へ（無線） | ネットワーク MIDI（Mac は標準対応）、Bluetooth MIDI | Bluetooth MIDI |
+| テンポ・音声の共有 | Ableton Link / Link Audio | Ableton Link / Link Audio |
+
+- Windows でネットワーク MIDI を受けるには、現状 rtpMIDI などのドライバーが必要
+- Ableton Link はテンポ・拍・再生を同期する。Link Audio（Ableton Live 12.4 以降、2026）は同じネットワーク内（同じ PC 内も可）で音声も送れるので、声の音声をそのまま Live に送れる
+- Link のライセンスは GPLv2+ か Ableton の商用ライセンス。App Store で配布するなら商用ライセンスを相談する
+
+### 8.7 共通アーキテクチャ
+
+どの形で使っても同じ解析結果になるよう、解析部分を 1 つのコアにまとめて使い回す。
+
+```
+解析コア（C++）: F0 推定 / ノート分割 / 調律補正 / キー推定 / 吸着 / クオンタイズ / MIDI 書き出し
+ ├─ WASM にビルド → Web 版（PWA、React の UI）
+ ├─ ネイティブ    → DAW プラグイン（JUCE。WebView で Web の UI を再利用）
+ └─ ネイティブ    → iOS / Android アプリ
+```
+
+- 共通のテスト用音声と正解データ（ゴールデンファイル）で、Web 版とプラグインの結果が一致することを CI で確認する
+- Web 版だけで行くなら解析コアは TypeScript でもよいが、プラグインを作るときに移植が必要になる（16 章で決定）
+
 ---
 
 ## 9. 非機能要件
@@ -342,6 +460,7 @@ interface Note {
 | 項目 | 目標 |
 |---|---|
 | リアルタイム表示の遅延 | 入力から描画まで 50 ms 以下（目標）、100 ms 以下（上限） |
+| ライブ MIDI の遅延（F-26） | 声の立ち上がりから MIDI ノートオンまで 60 ms 以下（PC、目標） |
 | 解析時間 | 30 秒の録音を中位スマホで 3 秒以内 |
 | 精度（MVP リリース判定） | 自社テストセット（静かな環境・メトロノームあり）で、ノート F1 ≥ 0.80（オンセット ±50 ms・音高 ±50¢）、オクターブ誤り率 ≤ 2%。数値は Phase 0 の結果を見て見直す |
 | オフライン | PWA として、録音から書き出しまでオフラインで動く |
@@ -366,6 +485,7 @@ interface Note {
 | 用途 | 採用候補 |
 |---|---|
 | 言語・ビルド | TypeScript、Vite |
+| 解析コア | C++ で書き、Emscripten で WASM にして Web 版で使う。DAW プラグインでも同じコードを使う（8.7 節）。Web 版だけで行くなら TypeScript でもよい（16 章で決定） |
 | UI | React、PWA（Workbox） |
 | 描画 | Canvas 2D（ピアノロール・ピッチ軌跡） |
 | 音声 | Web Audio API、AudioWorklet |
@@ -374,21 +494,23 @@ interface Note {
 | MIDI ファイル | @tonejs/midi（MIT）または自前実装 |
 | 音源 | Tone.js（MIT） |
 | 保存 | IndexedDB |
-| テスト | Vitest（解析アルゴリズムは純関数にして単体テスト）、Playwright（Chromium の偽マイク入力 `--use-file-for-fake-audio-capture` に WAV を流して E2E） |
+| テスト | 解析コアは共通のテスト用音声と正解データ（ゴールデンファイル）で回帰テスト。Web は Vitest と Playwright（Chromium の偽マイク入力 `--use-file-for-fake-audio-capture` に WAV を流して E2E） |
+| DAW 連携 | Web MIDI API、WebRTC（スマホ→PC）、File System Access API（書き出しフォルダ連携）。プラグインは JUCE 8 + ONNX Runtime（Phase 3） |
 | 精度評価 | Python + mir_eval（ノート F1） |
 
 ディレクトリ構成（案）:
 
 ```
-src/
-  audio/        マイク入力・AudioWorklet・再生
-  pitch/        F0 エンジン（SwiftF0 / YIN）
-  transcribe/   ノート分割・調律補正・キー推定・吸着・クオンタイズ（純関数）
-  midi/         SMF 書き出し
-  ui/           画面・ピアノロール
-  store/        プロジェクト保存（IndexedDB）
-public/models/  ONNX モデル
-eval/           精度評価スクリプトとテストセットの正解 MIDI
+core/             解析コア（C++）: F0 推定・ノート分割・調律補正・キー推定・吸着・クオンタイズ・MIDI 書き出し
+  tests/          ゴールデンファイルによる回帰テスト
+web/              Web 版（TypeScript / React）
+  src/audio/      マイク入力・AudioWorklet・再生
+  src/ui/         画面・ピアノロール
+  src/store/      プロジェクト保存（IndexedDB）
+  src/daw/        Web MIDI・WebRTC・書き出しフォルダ連携
+plugin/           DAW プラグイン（JUCE、Phase 3）
+models/           ONNX モデル
+eval/             精度評価スクリプトとテストセットの正解 MIDI
 ```
 
 ---
@@ -406,6 +528,14 @@ eval/           精度評価スクリプトとテストセットの正解 MIDI
 | HumTrans（データセット） | CC BY-NC 4.0 | ✕ | 研究・評価用途のみ |
 | MIDI-GPT | 学習済みモデルに CC BY-NC 4.0 の表記 | ✕〜要確認 | |
 | Essentia.js | AGPL-3.0 | △ | 使わない |
+| VST3 SDK | MIT（3.8 以降、2025-10） | ○ | Steinberg との契約は不要。「VST」の名前やロゴを使うなら商標規定に従う |
+| CLAP SDK | MIT | ○ | |
+| ARA SDK | Apache-2.0 | ○ | |
+| JUCE 8 | 商用ライセンス（Starter: 年間売上 2 万ドルまで無料、Indie: 30 万ドルまで）か AGPLv3 | ○（条件付き） | 売上規模に応じて切り替え |
+| ONNX Runtime | MIT | ○ | プラグイン・ネイティブ版の推論 |
+| NeuralNote | Apache-2.0 | ○ | プラグイン実装の参考 |
+| Ableton Link / Link Audio | GPLv2+ か Ableton の商用ライセンス | △ | App Store 配布は GPL と相性が悪いので商用ライセンスを相談 |
+| AAX（Pro Tools） | Avid の開発者契約と署名が必要 | △ | 後回し |
 
 特許: ビートボックス採譜に関する米国特許（US 12,437,735、Lemon Inc.）があるため、F-24 は実装前に調査する。
 
@@ -417,6 +547,21 @@ eval/           精度評価スクリプトとテストセットの正解 MIDI
 - **公開データ**: HumTrans、MIR-1K など（ライセンスの範囲内で評価のみに使う）
 - **指標**: フレーム単位の RPA / RCA、ノート F1（mir_eval）、オクターブ誤り率、解析時間、体感遅延
 - **比較対象**: SwiftF0 / PESTO / YIN / Basic Pitch、および競合アプリ（Nada、AnySing、Hum2MIDI）に同じ歌を入れた結果
+
+DAW 動作確認の対象（○ = 確認する、✕ = DAW 側が非対応、— = 対象外・未確認）:
+
+| DAW | MIDI ファイル | ライブ MIDI | プラグイン形式 | ARA |
+|---|---|---|---|---|
+| Ableton Live | ○ | ○ | VST3 / AU | ✕ |
+| Logic Pro | ○ | ○ | AU | ○ |
+| GarageBand（Mac） | ○ | ○ | AU | — |
+| FL Studio | ○ | ○ | VST3 / CLAP | ✕ |
+| Cubase | ○ | ○ | VST3 | ○ |
+| Studio One | ○ | ○ | VST3 / AU / CLAP | ○ |
+| Reaper | ○ | ○ | VST3 / AU / CLAP | ○ |
+| Bitwig Studio | ○ | ○ | VST3 / CLAP | ✕ |
+| Pro Tools | ○ | ○ | AAX | ○ |
+| Logic Pro for iPad / GarageBand（iOS） | ○ | — | AUv3 | — |
 
 ---
 
@@ -440,8 +585,8 @@ eval/           精度評価スクリプトとテストセットの正解 MIDI
 |---|---|---|
 | Phase 0 技術検証 | F0 エンジンの比較、iPhone Safari / Android Chrome での遅延計測、ノート分割の試作 | エンジン比較表（精度・速度・端末別遅延）ができ、スマホで「録音 → .mid 書き出し → DAW で開く」まで動く |
 | Phase 1 MVP | F-01〜F-12 | 9 章の精度目標を満たし、主要 DAW 6 種で読み込みを確認 |
-| Phase 2 | F-20〜F-25 | |
-| Phase 3 | F-30〜F-35 | |
+| Phase 2 | F-20〜F-29（DAW 連携のレベル 2 を含む） | PC ブラウザから主要 DAW へ、ライブ MIDI と同期録音ができる |
+| Phase 3 | F-30〜F-37（DAW プラグインを含む） | プラグインが主要 DAW で動き、Web 版と同じ解析結果になる |
 
 ---
 
@@ -457,6 +602,10 @@ eval/           精度評価スクリプトとテストセットの正解 MIDI
 | 学習済みモデル・データのライセンス | 11 章の表で採用前に確認 |
 | ビートボックス採譜の特許 | F-24 の実装前に調査 |
 | PWA のデータが消える | バックアップ書き出し、永続ストレージの要求 |
+| ブラウザから DAW へのドラッグ書き出しが不安定 | 主手段にせず、ダウンロードと書き出しフォルダ連携（F-13）を使う |
+| ライブ MIDI の遅延（検出に数十 ms かかる） | 「即応 ↔ 安定」スライダー、遅延の表示と補正手順。正確さが必要なら録ってからファイルで渡す |
+| プラグインの MIDI 出力を別トラックで受けられるかが DAW ごとに違う | ドラッグ＆ドロップを全 DAW 共通の手段にし、受けられない DAW は仮想 MIDI ポートで代替 |
+| プラグインの WebView UI が DAW によって不安定 | Phase 3 の最初に主要 DAW で検証。だめならネイティブ UI |
 
 ---
 
@@ -466,3 +615,5 @@ eval/           精度評価スクリプトとテストセットの正解 MIDI
 2. **AI の使い方**: 推奨は「メロディは生成しない。AI はコード付け・伴奏に限る」
 3. **収益モデル**: 推奨は「MIDI 書き出しは無料、Pro は機能追加で課金」
 4. **アプリ名**
+5. **主に使う DAW**: DAW 連携をどの DAW から確認・対応するかの優先順位が決まる
+6. **解析コアの言語**: プラグインまでやるなら、最初から C++ で書いて WASM 化するのを推奨（8.7 節）。Web 版だけなら TypeScript でもよい
