@@ -1,0 +1,172 @@
+<div class="app">
+  <header class="bar">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><rect x="1" y="1" width="26" height="26" rx="8" fill="#15181E"/><path d="M5 17 C 8 17, 9 11, 12 11 S 14 15, 16 15" fill="none" stroke="#FF6B4A" stroke-width="2.4" stroke-linecap="round"/><rect x="17" y="12.5" width="6.5" height="5" rx="1.5" fill="#56C2FF"/></svg>
+      <span class="title" id="title">サンプル</span>
+    </div>
+
+    <div class="transport">
+      <button type="button" class="ic" id="btn-start" title="先頭へ（Home）" aria-label="先頭へ">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><rect x="5" y="5" width="2.5" height="14" rx="1"/><path d="M19 5L9 12l10 7z"/></svg>
+      </button>
+      <button type="button" class="play" id="btn-play" title="再生（Space）" aria-label="再生">
+        <svg class="i-play" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><path d="M8 5l11 7-11 7z"/></svg>
+        <svg class="i-pause" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+      </button>
+      <button type="button" class="rec" id="btn-rec" title="録音（R）" aria-label="録音をはじめる"><span class="dot"></span></button>
+      <div class="counter" aria-live="off"><span class="pos" id="ctr-pos">1.1</span><span class="time" id="ctr-time">0:00</span></div>
+      <label class="chip bpm" title="テンポ"><span aria-hidden="true">♩</span><input id="bpm" type="number" min="40" max="240" step="1" value="96" aria-label="テンポ" inputmode="numeric"></label>
+      <span class="chip static" title="拍子">4/4</span>
+      <label class="chip key" title="キー"><select id="key" aria-label="キー"></select></label>
+      <button type="button" class="ic" id="btn-metro" title="メトロノーム" aria-label="メトロノーム" aria-pressed="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l3 18H6z"/><line x1="12" y1="15" x2="17" y2="6"/><line x1="7.5" y1="15" x2="16.5" y2="15"/></svg>
+      </button>
+      <button type="button" class="chip toggle" id="btn-count" title="カウントイン 1 小節" aria-label="カウントイン" aria-pressed="true">1–4</button>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="ic" id="btn-open" title="音声ファイルを開く" aria-label="音声ファイルを開く">
+        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><polyline points="9 13 12 10 15 13"/></svg>
+      </button>
+      <input id="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.webm,.flac" hidden>
+      <button type="button" class="ic" id="btn-settings" title="設定" aria-label="設定">
+        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="#111318"/><circle cx="15" cy="17" r="2.4" fill="#111318"/></svg>
+      </button>
+      <button type="button" class="ic ghost" id="btn-undo" title="元に戻す（⌘Z）" aria-label="元に戻す" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+      </button>
+      <button type="button" class="primary" id="btn-export" title="書き出し（⌘E）">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><polyline points="7 8 12 3 17 8"/><path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg>
+        書き出す
+      </button>
+    </div>
+  </header>
+
+  <main class="work">
+    <section class="editor" aria-label="ピアノロール">
+      <div class="roll-wrap" id="roll">
+        <canvas class="keys" aria-hidden="true"></canvas>
+        <canvas class="roll" role="img" aria-label="ノートと声の線"></canvas>
+        <div class="scroller"><div class="spacer"></div></div>
+        <div class="overlay count" id="count" hidden><span id="count-num">4</span></div>
+        <div class="overlay busy" id="busy" hidden>
+          <span class="busy-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+          <span class="progress"><i id="busy-bar"></i></span>
+        </div>
+        <div class="overlay drop" id="drop" hidden>
+          <svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><polyline points="7 10 12 15 17 10"/><path d="M5 19h14"/></svg>
+        </div>
+        <div class="empty" id="empty" hidden>
+          <button type="button" class="empty-btn" id="btn-empty-open">
+            <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><polyline points="9 13 12 10 15 13"/></svg>
+            音声を開く
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="inspector" aria-label="インスペクター">
+      <div class="card now">
+        <div class="now-head">
+          <span class="eyebrow" id="now-label">KEY</span>
+          <span class="rec-badge" id="rec-badge" hidden><i></i>REC</span>
+        </div>
+        <div class="now-main"><span class="big" id="now-note">C</span><span class="sub" id="now-sub"></span></div>
+        <div class="tuner" id="tuner" hidden role="img" aria-label="音程のずれ">
+          <span class="track"></span><span class="zone"></span><span class="center"></span><span class="needle" id="needle"></span>
+        </div>
+        <div class="meter" id="meter" hidden aria-hidden="true"><i id="meter-bar"></i></div>
+        <div class="info" id="now-info"></div>
+      </div>
+
+      <div class="card note-edit" id="note-edit" hidden>
+        <div class="cands" id="cands"></div>
+        <div class="row-btns">
+          <button type="button" class="soft" id="btn-listen" title="元の声を聴く"><svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true" fill="#FF6B4A"><path d="M8 5l11 7-11 7z"/></svg>原音</button>
+          <button type="button" class="soft" id="btn-delete" title="この音を削除（Delete）"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#FF8F75" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 20 7"/><path d="M6 7l1 13h10l1-13"/></svg>削除</button>
+        </div>
+      </div>
+
+      <div class="card flags" id="flags" hidden>
+        <div class="flags-head"><span class="badge" id="flag-count">0</span><span>確認</span></div>
+        <div class="flag-list" id="flag-list"></div>
+      </div>
+      <div class="card all-ok" id="all-ok" hidden>
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 12 10 17 19 7"/></svg>
+        OK
+      </div>
+
+      <div class="card knobs">
+        <div class="knob" id="knob-snap" data-label="SCALE" data-title="スケールに寄せる強さ"></div>
+        <div class="knob" id="knob-quant" data-label="GRID" data-title="タイミングをそろえる強さ"></div>
+        <div class="inst">
+          <button type="button" class="round" id="btn-inst" title="楽器を切り替える" aria-label="楽器">
+            <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><line x1="8" y1="5" x2="8" y2="13"/><line x1="12" y1="5" x2="12" y2="13"/><line x1="16" y1="5" x2="16" y2="13"/></svg>
+          </button>
+          <span class="eyebrow" id="inst-label">PIANO</span>
+        </div>
+      </div>
+
+      <div class="card fader">
+        <svg width="15" height="15" viewBox="0 0 24 24" role="img" aria-label="声" fill="none" stroke="#FF6B4A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/></svg>
+        <input id="balance" type="range" min="0" max="100" step="1" value="50" aria-label="声と楽器のバランス">
+        <svg width="15" height="15" viewBox="0 0 24 24" role="img" aria-label="楽器" fill="none" stroke="#56C2FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><line x1="8" y1="5" x2="8" y2="13"/><line x1="12" y1="5" x2="12" y2="13"/><line x1="16" y1="5" x2="16" y2="13"/></svg>
+      </div>
+    </aside>
+  </main>
+
+  <div class="backdrop" id="backdrop" hidden></div>
+
+  <section class="sheet" id="settings" role="dialog" aria-modal="true" aria-label="設定" hidden>
+    <div class="sheet-head"><span>設定</span><button type="button" class="ic ghost close" aria-label="閉じる"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button></div>
+    <div class="field"><span class="lbl">表記</span><div class="seg" data-setting="notation"><button type="button" data-v="letter">C D E</button><button type="button" data-v="doremi">ドレミ</button></div></div>
+    <div class="field"><span class="lbl">中央のド</span><div class="seg" data-setting="middleC"><button type="button" data-v="3">C3</button><button type="button" data-v="4">C4</button><button type="button" data-v="5">C5</button></div></div>
+    <div class="field"><span class="lbl">入力</span><div class="seg" data-setting="mode"><button type="button" data-v="sing">歌声</button><button type="button" data-v="hum">ハミング</button><button type="button" data-v="whistle">口笛</button></div></div>
+    <div class="field" id="field-latency"><span class="lbl">遅れ補正</span><input id="latency" type="range" min="-100" max="200" step="5" value="0" aria-label="遅れ補正"><span class="val" id="latency-val">0 ms</span></div>
+    <div class="field"><span class="lbl">サンプル</span><button type="button" class="soft" id="btn-sample">
+      <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-6 4 12 3-9 2 3h4"/></svg>読み込む</button></div>
+    <dl class="measure" id="measure"></dl>
+  </section>
+
+  <section class="sheet" id="export" role="dialog" aria-modal="true" aria-label="書き出し" hidden>
+    <div class="sheet-head"><span>書き出し</span><button type="button" class="ic ghost close" aria-label="閉じる"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button></div>
+    <div class="tiles" role="radiogroup" aria-label="形式">
+      <button type="button" class="tile" data-kind="both" role="radio">
+        <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2" stroke="#56C2FF"/><path d="M4 17c2 0 2-3 4-3s2 5 4 5 2-6 4-6 2 3 4 3" stroke="#FF6B4A"/></svg>
+        <b>MIDI ＋ 声</b><small data-ext="both">.zip</small>
+      </button>
+      <button type="button" class="tile" data-kind="midi" role="radio">
+        <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#56C2FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><line x1="8" y1="5" x2="8" y2="13"/><line x1="12" y1="5" x2="12" y2="13"/><line x1="16" y1="5" x2="16" y2="13"/></svg>
+        <b>MIDI</b><small data-ext="midi">.mid</small>
+      </button>
+      <button type="button" class="tile" data-kind="wav" role="radio">
+        <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#FF6B4A" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 11v2"/></svg>
+        <b>声</b><small data-ext="wav">.wav</small>
+      </button>
+    </div>
+    <label class="name-field"><span class="lbl">名前</span><input id="export-name" type="text" spellcheck="false" autocomplete="off"></label>
+    <div class="drop-diagram" aria-label="DAW の 1 小節目に置く">
+      <svg viewBox="0 0 320 84" width="100%" height="84" aria-hidden="true">
+        <rect x="0" y="0" width="320" height="84" rx="12" fill="#0C0D11"/>
+        <g font-family="Space Grotesk, sans-serif" font-size="10" font-weight="600" fill="#7C8494">
+          <text x="44" y="16">1</text><text x="112" y="16">2</text><text x="180" y="16">3</text><text x="248" y="16">4</text>
+        </g>
+        <g stroke="#2A2E36"><line x1="40.5" y1="22" x2="40.5" y2="76"/><line x1="108.5" y1="22" x2="108.5" y2="76"/><line x1="176.5" y1="22" x2="176.5" y2="76"/><line x1="244.5" y1="22" x2="244.5" y2="76"/></g>
+        <rect x="10" y="28" width="22" height="18" rx="4" fill="#15181E"/><rect x="10" y="52" width="22" height="18" rx="4" fill="#15181E"/>
+        <rect x="16" y="35" width="10" height="4" rx="1" fill="#56C2FF"/><path d="M14 61c2 0 2-3 4-3s2 5 4 5 2-4 4-4" fill="none" stroke="#FF6B4A" stroke-width="1.5" stroke-linecap="round"/>
+        <rect x="41" y="28" width="196" height="18" rx="4" fill="#56C2FF" fill-opacity="0.22" stroke="#56C2FF"/>
+        <g fill="#56C2FF"><rect x="48" y="38" width="22" height="4" rx="1"/><rect x="74" y="35" width="12" height="4" rx="1"/><rect x="90" y="33" width="12" height="4" rx="1"/><rect x="108" y="35" width="22" height="4" rx="1"/><rect x="134" y="38" width="20" height="4" rx="1"/><rect x="160" y="31" width="12" height="4" rx="1"/><rect x="176" y="30" width="12" height="4" rx="1"/><rect x="192" y="31" width="20" height="4" rx="1"/></g>
+        <rect x="41" y="52" width="196" height="18" rx="4" fill="#FF6B4A" fill-opacity="0.16" stroke="#FF6B4A"/>
+        <path d="M46 61h6l3-4 4 8 4-7 4 6 4-5 6 4 5-3 6 5 7-6 5 4 8-3 6 4 7-5 6 4 7-2 6 3 8-4 6 3 7-2 9 2 6-3 6 2 8-2 5 2h12" fill="none" stroke="#FF6B4A" stroke-width="1.2" stroke-linejoin="round"/>
+        <path d="M41 22v54" stroke="#45E0A2" stroke-width="2"/><circle cx="41" cy="22" r="3.5" fill="#45E0A2"/>
+      </svg>
+    </div>
+    <p class="note" id="export-note" hidden></p>
+    <button type="button" class="primary wide" id="btn-download">
+      <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><polyline points="7 10 12 15 17 10"/><path d="M5 19h14"/></svg>
+      <span>ダウンロード</span>
+    </button>
+  </section>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+</div>

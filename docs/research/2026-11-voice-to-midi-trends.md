@@ -90,6 +90,19 @@
 - [TRIA](https://arxiv.org/html/2509.15625v1)（2025-09）: 声やリズムの身振りから、指定した音色でドラム音声を生成する。
 - 特許: [US 12,437,735「Beatboxing transcription」](https://ipiq.io/patents/7019848)（Lemon Inc.、2025-10 付）。この機能を実装する前に調査が必要。
 
+### 2.8 DAW 連携の技術
+
+- **プラグイン規格のライセンス緩和**: VST3 SDK は 3.8（2025-10）から MIT ライセンスになった。従来の GPLv3 / 独自ライセンスの二本立てをやめ、Steinberg との契約なしで商用利用できる（[Steinberg 開発者ポータル](https://steinbergmedia.github.io/vst3_dev_portal/pages/VST+3+Licensing/VST3+License)、[Sound On Sound](https://www.soundonsound.com/news/steinberg-adopt-mit-license-vst3)）。
+- **ARA**（DAW のタイムライン上の音声にプラグインが直接アクセスする仕組み。Melodyne 方式）: SDK は [Apache-2.0](https://github.com/Celemony/ARA_SDK) で、VST3 / AU / CLAP 向けの導入スクリプトがある。対応 DAW は Logic Pro、Cubase / Nuendo、Studio One、Reaper、Pro Tools、Cakewalk など（[Boris FX](https://borisfx.com/blog/what-is-ara2-in-audio-production/)、[JUCE フォーラム](https://forum.juce.com/t/what-daws-support-ara/53876)）。Ableton Live、FL Studio、Bitwig は 2026 年時点で非対応。FL Studio は公式フォーラムで「ロードマップにある」と回答している（[Image-Line フォーラム](https://forum.image-line.com/viewtopic.php?p=2073824)）。
+- **CLAP**: Bitwig、Reaper、Studio One 7、FL Studio などが対応（[KVR](https://www.kvraudio.com/forum/viewtopic.php?p=9002948)）。Logic Pro と Pro Tools は非対応（[Antares](https://www.antarestech.com/blog/vst3-au-aax-clap-plugin-formats-2026)）。
+- **DAWproject**（DAW 共通のプロジェクト形式）: Bitwig 5.0.9 以降、Studio One 6.5 以降、Cubase 14 以降などが対応。Reaper は外部ツール経由。Ableton Live / Logic Pro / Pro Tools の対応は確認できなかった（[Bitwig](https://bitwig.com/stories/transferring-projects-between-bitwig-studio-and-other-daws-333)、[Bitwig FAQ](https://www.bitwig.com/support/technical_support/system-requirements-62/)）。
+- **仮想 MIDI ポート**: Windows MIDI Services にループバック（`Default App Loopback (A)` / `(B)`）が標準で入り、loopMIDI なしでアプリ間で MIDI を送れる。Microsoft は「ブラウザの Web MIDI からも使える」としている。ただしプレビュー段階の機能もある（[Microsoft](https://microsoft.github.io/MIDI/kb/common-midi-tasks/)、[Steinberg フォーラム](https://forums.steinberg.net/t/loopmidi-loopbe-etc-virtual-ports-replacement-for-windows/1025292)）。Mac は従来から IAC Driver がある。
+- **Web MIDI の許可**: Chrome 124 以降、Web MIDI の利用には許可ダイアログが必須（[Chrome for Developers](https://developer.chrome.com/blog/web-midi-permission-prompt)）。
+- **ブラウザからのドラッグ書き出し**: Chrome の `DownloadURL` は Chromium 限定・HTTP の URL が必要などの制約が多く、DAW へのドラッグに失敗する報告もある（[web.dev](https://web.dev/case-studies/box-dnd-download)、[HISE フォーラム](https://forum.hise.audio/post/39429)）。JUCE の WebView からもバイナリファイルはドラッグできない（[JUCE フォーラム](https://forum.juce.com/t/webview-drag-and-drop-audio-files-out-of-plugin/64813)）。
+- **Ableton Link Audio**（Live 12.4、2026）: 同じネットワーク内（同じ PC 内も可）で音声を送り合える Link の拡張。Link 自体は GPLv2+ と商用ライセンスの二本立て（[Ableton ヘルプ](https://help.ableton.com/hc/en-us/articles/25425913328924)、[GitHub](https://github.com/Ableton/link)、[CDM](https://cdm.link/ableton-live-12-4-adds-link-audio-updated-effects-hands-on-details/)）。
+- **JUCE 8**: WebView で HTML / JS の UI を作れる。ただし DAW 内でのクラッシュ報告もある（[JUCE フォーラム](https://forum.juce.com/t/webkit-processthrottler-crash-in-juce-8-webview-plugin-macos/68055)）。ライセンスは、年間売上 2 万ドルまで無料の Starter、30 万ドルまでの Indie などの商用ライセンスと AGPLv3 の二本立て（[JUCE フォーラム](https://forum.juce.com/t/revenue-limits-for-juce-tiers/61058)）。
+- **参考実装**: [NeuralNote](https://github.com/damrsn/neuralnote)（Apache-2.0）。Basic Pitch を使う音声→MIDI プラグイン（VST3 / AU / スタンドアロン）で、MIDI はプラグイン画面からトラックへドラッグ＆ドロップで書き出す。
+
 ---
 
 ## 3. まとめ（設計への示唆）
@@ -101,6 +114,7 @@
 5. AI は「代わりに作る」より「コード付け・伴奏」に使う方が、Nada を支持する層の価値観と矛盾しない。
 6. Android と Web は空白地帯。
 7. 学習済みモデルやデータセットに非商用ライセンスが多いので、採用前に必ず確認する。
+8. DAW 連携は「ファイル → リアルタイム MIDI → プラグイン」の順に難しくなる。VST3 が MIT になるなど規格側のハードルは下がっており、プラグイン化は現実的。
 
 ---
 
@@ -141,3 +155,13 @@
 - [APSIPA 2025 timbre transfer](https://webdev.apsipa.org/proceedings/2025/papers/APSIPA2025_P071.pdf) / [Berkeley 2025](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2025/31739.html)
 - [TRIA – arXiv 2509.15625](https://arxiv.org/html/2509.15625v1)
 - [US 12,437,735 Beatboxing transcription](https://ipiq.io/patents/7019848)
+- VST3 の MIT 化: [Steinberg 開発者ポータル](https://steinbergmedia.github.io/vst3_dev_portal/pages/VST+3+Licensing/VST3+License) / [Sound On Sound](https://www.soundonsound.com/news/steinberg-adopt-mit-license-vst3)
+- ARA: [ARA SDK – GitHub](https://github.com/Celemony/ARA_SDK) / [Boris FX](https://borisfx.com/blog/what-is-ara2-in-audio-production/) / [JUCE フォーラム](https://forum.juce.com/t/what-daws-support-ara/53876) / [Image-Line フォーラム](https://forum.image-line.com/viewtopic.php?p=2073824)
+- CLAP: [KVR](https://www.kvraudio.com/forum/viewtopic.php?p=9002948) / [Antares](https://www.antarestech.com/blog/vst3-au-aax-clap-plugin-formats-2026)
+- DAWproject: [Bitwig](https://bitwig.com/stories/transferring-projects-between-bitwig-studio-and-other-daws-333) / [Bitwig FAQ](https://www.bitwig.com/support/technical_support/system-requirements-62/)
+- Windows MIDI ループバック: [Microsoft](https://microsoft.github.io/MIDI/kb/common-midi-tasks/) / [Steinberg フォーラム](https://forums.steinberg.net/t/loopmidi-loopbe-etc-virtual-ports-replacement-for-windows/1025292)
+- [Web MIDI の許可 – Chrome for Developers](https://developer.chrome.com/blog/web-midi-permission-prompt)
+- ドラッグ書き出し: [web.dev](https://web.dev/case-studies/box-dnd-download) / [HISE フォーラム](https://forum.hise.audio/post/39429) / [JUCE フォーラム](https://forum.juce.com/t/webview-drag-and-drop-audio-files-out-of-plugin/64813)
+- Ableton Link Audio: [Ableton ヘルプ](https://help.ableton.com/hc/en-us/articles/25425913328924) / [GitHub](https://github.com/Ableton/link) / [CDM](https://cdm.link/ableton-live-12-4-adds-link-audio-updated-effects-hands-on-details/)
+- JUCE 8: [WebView のクラッシュ報告](https://forum.juce.com/t/webkit-processthrottler-crash-in-juce-8-webview-plugin-macos/68055) / [ライセンスの売上上限](https://forum.juce.com/t/revenue-limits-for-juce-tiers/61058)
+- [NeuralNote – GitHub](https://github.com/damrsn/neuralnote)
