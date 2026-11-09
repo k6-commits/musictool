@@ -1202,9 +1202,9 @@ function rollData() {
 }
 
 function drawRoll(): void {
-  const r = rec;
+  const r = rec; // set exactly while counting in or recording
   let view: Omit<RollView, 'playhead' | 'selectedId' | 'keyLabel' | 'beatsPerBar' | 'grid'>;
-  if (r && (S.phase === 'count' || S.phase === 'rec')) {
+  if (r) {
     view = {
       notes: r.rollNotes,
       curve: { beats: r.curveBeats.view(), pitch: r.curvePitch.view() },
@@ -1247,7 +1247,7 @@ function loop(): void {
 function frame(): void {
   raf = 0;
   let again = false;
-  if (rec && (S.phase === 'count' || S.phase === 'rec')) {
+  if (rec) {
     updateRecording(rec);
     renderNow();
     again = true;
