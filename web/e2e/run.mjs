@@ -170,6 +170,11 @@ try {
   await page.waitForFunction(() => window.__mt.phase === 'idle' && window.__mt.notes().length > 0);
   const sungAgain = await page.evaluate(() => window.__mt.notes());
   check('a hand-fixed note survives re-analysis in another mode', hummed[8]?.name === 'F♯4' && sungAgain[8]?.name === 'F♯4' && !sungAgain[8].flagged, `${hummed[8]?.name} / ${sungAgain[8]?.name}`);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+z');
+  const undoneAgain = (await page.evaluate(() => window.__mt.notes()))[8];
+  check('the fix can still be undone after re-analysis', undoneAgain?.name === 'F4' && undoneAgain.flagged, `${undoneAgain?.name}${undoneAgain?.flagged ? ' (flagged)' : ''}`);
+  await page.click('#btn-settings');
   await page.click('#btn-sample');
   await page.waitForFunction(() => window.__mt.phase === 'idle' && window.__mt.notes()[8]?.flagged);
 
@@ -280,30 +285,66 @@ try {
   const scale = await page.textContent('#knob-snap text');
   await page.keyboard.press('Home');
   check('Home rewinds after a knob drag without moving the knob', moved !== '1.1' && (await counter(page)) === '1.1' && (await page.textContent('#knob-snap text')) === scale, `cursor ${moved} → ${await counter(page)}, SCALE ${scale} → ${await page.textContent('#knob-snap text')}`);
+  await page.mouse.click(roll.x + roll.width * 0.6, roll.y + roll.height - 80);
+  const moved2 = await counter(page);
+  const balance = await page.inputValue('#balance');
+  await page.locator('.fader svg').first().click();
+  await page.keyboard.press('Home');
+  check('Home rewinds after a click on the fader card without moving the fader', moved2 !== '1.1' && (await counter(page)) === '1.1' && (await page.inputValue('#balance')) === balance, `cursor ${moved2} → ${await counter(page)}, balance ${balance} → ${await page.inputValue('#balance')}`);
+  const altArrow = await page.evaluate(() => {
+    const ev = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
+    document.body.dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented, label: document.getElementById('now-label').textContent };
+  });
+  check('Alt+← is left to the browser (Back)', !altArrow.prevented, `prevented ${altArrow.prevented}, ${altArrow.label}`);
 
-  // ---- a file dropped anywhere is loaded (not opened by the browser)
+  // ---- a file dropped anywhere is loaded (not opened by the browser), even onto an open sheet
   const bytes = Array.from(await readFile(filePath));
-  const prevented = await page.evaluate((data) => {
-    const dt = new DataTransfer();
-    dt.items.add(new File([new Uint8Array(data)], 'dropped.wav', { type: 'audio/wav' }));
-    const ev = new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true });
-    document.querySelector('.inspector').dispatchEvent(ev);
-    return ev.defaultPrevented;
-  }, bytes);
+  const dropOn = (selector) =>
+    page.evaluate(
+      ({ data, selector }) => {
+        const dt = new DataTransfer();
+        dt.items.add(new File([new Uint8Array(data)], 'dropped.wav', { type: 'audio/wav' }));
+        const ev = new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true });
+        document.querySelector(selector).dispatchEvent(ev);
+        return ev.defaultPrevented;
+      },
+      { data: bytes, selector },
+    );
+  const prevented = await dropOn('.inspector');
   await page.waitForFunction(() => window.__mt.take()?.name === 'dropped' && window.__mt.phase === 'idle', null, { timeout: 20000 });
   check('a file dropped outside the roll is loaded', prevented);
+  await page.click('#btn-settings');
+  await page.click('#btn-sample');
+  await page.waitForFunction(() => window.__mt.take()?.source === 'sample' && window.__mt.phase === 'idle');
+  await page.click('#btn-export');
+  await dropOn('#export');
+  await page.waitForFunction(() => window.__mt.take()?.name === 'dropped' && window.__mt.phase === 'idle', null, { timeout: 20000 });
+  const sheetClosed = await page.evaluate(() => document.getElementById('export').hidden);
+  await page.click('#btn-export');
+  const exportName = await page.inputValue('#export-name');
+  await page.keyboard.press('Escape');
+  check('a file dropped on the export sheet is exported under its own name', sheetClosed && exportName === 'dropped', `sheet ${sheetClosed ? 'closed' : 'open'}, name ${exportName}`);
 
   // ---- a 5-minute take: the roll canvas stays viewport-sized and draws at both ends; playback stays smooth
   await page.setInputFiles('#file', longPath);
   await page.waitForFunction(() => window.__mt.take()?.name === 'long-take' && window.__mt.phase === 'idle', null, { timeout: 60000 });
+  // Pixels in the note color and in the voice curve's color, over the background or over a note
+  // (everything else on the roll is dark grey or the dim waveform lane).
   const drawn = () =>
     page.evaluate(() => {
       const c = document.querySelector('canvas.roll');
       const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-      let lit = 0;
-      for (let i = 3; i < d.length; i += 4 * 97) if (d[i] > 0) lit++;
-      return { width: c.width, lit };
+      const near = (i, r, g, b) => Math.abs(d[i] - r) + Math.abs(d[i + 1] - g) + Math.abs(d[i + 2] - b) < 60;
+      let notes = 0;
+      let voice = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (near(i, 86, 194, 255)) notes++;
+        else if (near(i, 219, 93, 65) || near(i, 230, 120, 101)) voice++;
+      }
+      return { width: c.width, notes, voice };
     });
+  await page.waitForTimeout(1600); // the notes' fade-in after loading (at most about 1.4 s)
   const startView = await drawn();
   await page.evaluate(() => {
     const s = document.querySelector('.scroller');
@@ -314,7 +355,8 @@ try {
   await page.evaluate(() => {
     document.querySelector('.scroller').scrollLeft = 0;
   });
-  check('long take: roll canvas stays viewport-sized and draws', startView.width <= 1400 && startView.lit > 100 && endView.lit > 100, `canvas ${startView.width}px, ${(await page.evaluate(() => window.__mt.notes().length))} notes`);
+  const draws = (v) => v.notes > 2000 && v.voice > 200;
+  check('long take: roll canvas stays viewport-sized and draws notes and voice at both ends', startView.width <= 1400 && draws(startView) && draws(endView), `canvas ${startView.width}px, ${(await page.evaluate(() => window.__mt.notes().length))} notes; note/voice pixels ${startView.notes}/${startView.voice} at the start, ${endView.notes}/${endView.voice} at the end`);
   await page.click('#btn-play');
   const fps = await page.evaluate(
     () =>

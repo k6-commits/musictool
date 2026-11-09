@@ -195,9 +195,13 @@ function getPlayer(): Player {
   return player;
 }
 
-/** Output latency: the context's own processing (baseLatency) plus the system's (outputLatency). */
+/**
+ * Output latency. Chromium's outputLatency already includes the callback buffer that baseLatency reports,
+ * Firefox reports baseLatency as 0 and WebKit's is one render quantum, so adding the two would count the
+ * buffer twice: outputLatency alone, or baseLatency where outputLatency is not reported.
+ */
 function outputLatency(ac: AudioContext): number {
-  return (ac.baseLatency || 0) + (ac.outputLatency || 0);
+  return ac.outputLatency || ac.baseLatency || 0;
 }
 
 // ---------------------------------------------------------------- elements
@@ -384,53 +388,75 @@ function detectKeyOf(notes: RawNote[]): Key | null {
   return detectKey(notes.map((n) => ({ pitch: Math.round(n.pitch), duration: n.end - n.start })))[0]?.key ?? null;
 }
 
+type Span = { start: number; end: number };
+
 /** Hand edits, located by time so they survive a re-analysis that renumbers the notes. */
 interface CarriedEdits {
-  fixed: { start: number; end: number; pitch: number }[];
-  deleted: { start: number; end: number }[];
+  fixed: (Span & { pitch: number })[];
+  deleted: Span[];
 }
 
-function collectEdits(t: Take): CarriedEdits {
+/** What a re-analysis of the same audio keeps: the hand edits, the undo history and the selection. */
+interface Carried {
+  edits: CarriedEdits;
+  undo: { step: Snapshot; edits: CarriedEdits }[];
+  selected: Span | null;
+}
+
+function collectEdits(t: Take, fixed: Record<string, number>, deleted: Iterable<string>): CarriedEdits {
   const byId = new Map(t.trans.notes.map((n) => [n.id, n]));
-  const fixed: CarriedEdits['fixed'] = [];
-  const deleted: CarriedEdits['deleted'] = [];
-  for (const [id, pitch] of Object.entries(S.fixed)) {
+  const out: CarriedEdits = { fixed: [], deleted: [] };
+  for (const [id, pitch] of Object.entries(fixed)) {
     const n = byId.get(id);
-    if (n) fixed.push({ start: n.start, end: n.end, pitch });
+    if (n) out.fixed.push({ start: n.start, end: n.end, pitch });
   }
-  for (const id of S.deleted) {
+  for (const id of deleted) {
     const n = byId.get(id);
-    if (n) deleted.push({ start: n.start, end: n.end });
+    if (n) out.deleted.push({ start: n.start, end: n.end });
   }
-  return { fixed, deleted };
+  return out;
+}
+
+function carryOver(t: Take): Carried {
+  const sel = S.selected ? t.trans.notes.find((n) => n.id === S.selected) : undefined;
+  return {
+    edits: collectEdits(t, S.fixed, S.deleted),
+    undo: S.undo.map((step) => ({ step, edits: collectEdits(t, step.fixed, step.deleted) })),
+    selected: sel ? { start: sel.start, end: sel.end } : null,
+  };
 }
 
 /**
- * Apply carried edits to the note that overlaps each edited span the most, covering at least half of both
- * (so an edit on a short blip is dropped rather than applied to a long note that absorbed it).
+ * The note that overlaps a span the most, covering at least half of both (so an edit on a short blip is
+ * dropped rather than applied to a long note that absorbed it).
  */
-function applyEdits(notes: RawNote[], carried: CarriedEdits): void {
-  const match = (span: { start: number; end: number }) => {
-    let best: RawNote | null = null;
-    let bestOverlap = 0;
-    for (const n of notes) {
-      const overlap = Math.min(n.end, span.end) - Math.max(n.start, span.start);
-      const need = 0.5 * Math.max(n.end - n.start, span.end - span.start);
-      if (overlap >= need && overlap > bestOverlap) {
-        best = n;
-        bestOverlap = overlap;
-      }
+function matchSpan(notes: RawNote[], span: Span): RawNote | null {
+  let best: RawNote | null = null;
+  let bestOverlap = 0;
+  for (const n of notes) {
+    const overlap = Math.min(n.end, span.end) - Math.max(n.start, span.start);
+    const need = 0.5 * Math.max(n.end - n.start, span.end - span.start);
+    if (overlap >= need && overlap > bestOverlap) {
+      best = n;
+      bestOverlap = overlap;
     }
-    return best;
-  };
-  for (const f of carried.fixed) {
-    const n = match(f);
-    if (n) S.fixed[n.id] = f.pitch;
   }
-  for (const d of carried.deleted) {
-    const n = match(d);
-    if (n) S.deleted.add(n.id);
+  return best;
+}
+
+/** Carried edits on the notes of a new analysis. */
+function applyEdits(notes: RawNote[], edits: CarriedEdits): { fixed: Record<string, number>; deleted: Set<string> } {
+  const fixed: Record<string, number> = {};
+  const deleted = new Set<string>();
+  for (const f of edits.fixed) {
+    const n = matchSpan(notes, f);
+    if (n) fixed[n.id] = f.pitch;
   }
+  for (const d of edits.deleted) {
+    const n = matchSpan(notes, d);
+    if (n) deleted.add(n.id);
+  }
+  return { fixed, deleted };
 }
 
 // ---------------------------------------------------------------- loading takes
@@ -444,8 +470,8 @@ interface TakeInput {
   timing?: { zero: number; bpm: number };
   /** Pitch frames already computed with the current input mode (live, while recording). */
   analysis?: { frames: PitchFrame[]; stats: AnalyzeStats };
-  /** Hand edits to keep from an earlier analysis of the same audio. */
-  carried?: CarriedEdits;
+  /** A re-analysis of the same audio: what to keep from the earlier analysis (the view also stays put). */
+  carried?: Carried;
 }
 
 function envelopeOf(frames: PitchFrame[]): Float32Array {
@@ -502,18 +528,27 @@ async function loadTake(input: TakeInput): Promise<void> {
       curveRange: Number.isFinite(lo) ? [lo, hi] : [NaN, NaN],
     };
     S.bpm = Math.max(40, Math.min(240, bpm));
-    S.fixed = {};
-    S.deleted = new Set();
-    if (input.carried) applyEdits(trans.notes, input.carried);
-    S.selected = null;
-    S.undo = [];
+    const carried = input.carried;
+    const edits = carried ? applyEdits(trans.notes, carried.edits) : { fixed: {}, deleted: new Set<string>() };
+    S.fixed = edits.fixed;
+    S.deleted = edits.deleted;
+    S.undo = carried
+      ? carried.undo.map(({ step, edits: e }) => {
+          const mapped = applyEdits(trans.notes, e);
+          return { ...step, fixed: mapped.fixed, deleted: [...mapped.deleted] };
+        })
+      : [];
     S.undoTag = '';
+    const sel = carried?.selected ? matchSpan(trans.notes, carried.selected) : null;
+    S.selected = sel && !S.deleted.has(sel.id) ? sel.id : null;
     S.detectedKey = detectKeyOf(shiftedNotes(S.take));
     if (S.keyAuto) S.key = S.detectedKey ?? CHROMATIC;
-    S.cursorBeat = 0;
     S.playheadBeat = null;
     S.appearAt = performance.now() + 120;
-    roll.scrollToStart();
+    if (!carried) {
+      S.cursorBeat = 0;
+      roll.scrollToStart();
+    }
     if (!trans.notes.length) toast('声が見つかりませんでした', 'warn');
   } catch {
     toast('解析できませんでした', 'warn');
@@ -567,7 +602,7 @@ async function loadFile(file: File): Promise<void> {
 async function reanalyze(): Promise<void> {
   const t = S.take;
   if (!t || S.phase !== 'idle' || t.mode === P.mode) return;
-  await loadTake({ name: t.name, source: t.source, buffer: t.buffer, timing: { zero: t.zero, bpm: S.bpm }, carried: collectEdits(t) });
+  await loadTake({ name: t.name, source: t.source, buffer: t.buffer, timing: { zero: t.zero, bpm: S.bpm }, carried: carryOver(t) });
 }
 
 // ---------------------------------------------------------------- recording
@@ -1630,7 +1665,10 @@ document.addEventListener('drop', (e) => {
   dragDepth = 0;
   el.drop.hidden = true;
   const f = e.dataTransfer?.files?.[0];
-  if (f) void loadFile(f);
+  if (!f) return;
+  // A sheet left open would still show the previous take (the export sheet keeps its name).
+  closeSheet();
+  void loadFile(f);
 });
 
 /** Space is play/stop everywhere except in text fields, so a focused button must not also activate on it. */
@@ -1668,7 +1706,8 @@ document.addEventListener('keydown', (e) => {
   } else if (mod && e.key.toLowerCase() === 'e') {
     e.preventDefault();
     openExport();
-  } else if (mod) {
+  } else if (mod || e.altKey) {
+    // Other Ctrl/⌘ and Alt combinations belong to the browser (Alt+← is Back).
     return;
   } else if (e.key === ' ') {
     e.preventDefault();
