@@ -47,6 +47,7 @@ export class Knob {
       this.paint(v);
       onInput(v);
     });
+    releaseFocusAfterPointer(this.input);
   }
 
   set(v: number): void {
@@ -61,4 +62,12 @@ export class Knob {
     this.dot.setAttribute('cy', y.toFixed(2));
     this.text.textContent = String(Math.round(v * 100));
   }
+}
+
+/**
+ * After a mouse or touch drag, give focus back to the page so shortcuts such as Home or the arrow keys
+ * do not silently move the slider. Keyboard users who tab to it keep the native slider keys.
+ */
+export function releaseFocusAfterPointer(input: HTMLInputElement): void {
+  input.addEventListener('pointerup', () => input.blur());
 }

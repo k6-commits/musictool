@@ -53,7 +53,7 @@ ${body}
   await mkdir(join(root, 'dist'), { recursive: true });
   await writeFile(join(root, 'dist/index.html'), standalone);
   await writeFile(join(root, 'dist/artifact.html'), fragment);
-  return { bytes: standalone.length, warnings: result.warnings.length };
+  return { bytes: standalone.length };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

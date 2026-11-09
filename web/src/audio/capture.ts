@@ -1,5 +1,7 @@
 // Microphone capture with raw (unprocessed) audio and context-frame timestamps,
 // so recorded samples can be lined up with the metronome clicks.
+// One MicCapture lives for one take: it is opened when recording starts and closed when it stops,
+// so the browser's microphone indicator is only on while recording.
 
 const WORKLET_SOURCE = `
 class MtTap extends AudioWorkletProcessor {
@@ -10,11 +12,17 @@ class MtTap extends AudioWorkletProcessor {
     this.start = 0;
   }
   process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
-    if (ch) {
+    const input = inputs[0];
+    if (input && input.length) {
+      const len = input[0].length;
       if (this.n === 0) this.start = currentFrame;
-      this.buf.set(ch, this.n);
-      this.n += ch.length;
+      // Mono mix of whatever channels arrive (a stereo interface may carry the voice on one side only).
+      for (let i = 0; i < len; i++) {
+        let s = 0;
+        for (let c = 0; c < input.length; c++) s += input[c][i];
+        this.buf[this.n + i] = s / input.length;
+      }
+      this.n += len;
       if (this.n >= 512) {
         this.port.postMessage({ frame: this.start, data: this.buf.slice(0, this.n) });
         this.n = 0;
@@ -28,6 +36,8 @@ registerProcessor('mt-tap', MtTap);
 
 export type ChunkListener = (data: Float32Array, frame: number) => void;
 
+const workletLoaded = new WeakSet<BaseAudioContext>();
+
 export class MicCapture {
   readonly sampleRate: number;
   /** Estimated input latency in seconds (0 when the browser does not say). */
@@ -35,8 +45,11 @@ export class MicCapture {
   readonly kind: 'worklet' | 'script-processor';
   /** RMS of the latest chunk, for the level meter. */
   level = 0;
+  /** Called once if the device goes away (unplugged, permission revoked) while open. */
+  onEnded: (() => void) | null = null;
   private listener: ChunkListener | null = null;
   private nextFrame = -1;
+  private closed = false;
 
   private constructor(
     readonly ctx: AudioContext,
@@ -46,8 +59,12 @@ export class MicCapture {
   ) {
     this.sampleRate = ctx.sampleRate;
     this.kind = kind;
-    const settings = stream.getAudioTracks()[0]?.getSettings() as MediaTrackSettings & { latency?: number };
+    const track = stream.getAudioTracks()[0];
+    const settings = track?.getSettings() as (MediaTrackSettings & { latency?: number }) | undefined;
     this.inputLatency = typeof settings?.latency === 'number' ? settings.latency : 0;
+    track?.addEventListener('ended', () => {
+      if (!this.closed) this.onEnded?.();
+    });
   }
 
   static supported(): boolean {
@@ -70,24 +87,35 @@ export class MicCapture {
 
     let capture: MicCapture;
     try {
-      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
-      await ctx.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
-      const node = new AudioWorkletNode(ctx, 'mt-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+      if (!workletLoaded.has(ctx)) {
+        const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
+        try {
+          await ctx.audioWorklet.addModule(url);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+        workletLoaded.add(ctx);
+      }
+      const node = new AudioWorkletNode(ctx, 'mt-tap', { numberOfInputs: 1, numberOfOutputs: 1 });
       source.connect(node);
       node.connect(mute);
       capture = new MicCapture(ctx, stream, [source, node, mute], 'worklet');
       node.port.onmessage = (e: MessageEvent<{ frame: number; data: Float32Array }>) =>
         capture.receive(e.data.data, e.data.frame);
     } catch {
-      // Older browsers or pages that forbid blob: workers.
+      // Older browsers or pages that forbid blob: workers. The node down-mixes its input to mono.
       const node = ctx.createScriptProcessor(1024, 1, 1);
       source.connect(node);
       node.connect(mute);
       capture = new MicCapture(ctx, stream, [source, node, mute], 'script-processor');
+      // playbackTime is read on the main thread and jitters, so only the first block is stamped from it;
+      // later blocks continue the sample count, which keeps the timeline free of invented gaps.
+      let next = -1;
       node.onaudioprocess = (e) => {
-        const frame = Math.round(e.playbackTime * ctx.sampleRate) - e.inputBuffer.length;
-        capture.receive(new Float32Array(e.inputBuffer.getChannelData(0)), frame);
+        const data = new Float32Array(e.inputBuffer.getChannelData(0));
+        if (next < 0) next = Math.max(0, Math.round(e.playbackTime * ctx.sampleRate) - data.length);
+        capture.receive(data, next);
+        next += data.length;
       };
     }
     return capture;
@@ -112,6 +140,8 @@ export class MicCapture {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.listener = null;
     for (const n of this.nodes) n.disconnect();
     for (const t of this.stream.getTracks()) t.stop();
@@ -128,10 +158,6 @@ export class TakeRecorder {
     if (this.firstFrame < 0) this.firstFrame = frame;
     this.chunks.push(data);
     this.length += data.length;
-  }
-
-  get samples(): number {
-    return this.length;
   }
 
   merge(): Float32Array {

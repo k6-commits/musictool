@@ -7,7 +7,6 @@
   --surface-3: #1a1d24;
   --hover: #1c2027;
   --line: #15181e;
-  --line-2: #23272f;
   --text: #f4f5f7;
   --text-2: #9ba3b0;
   --text-3: #7c8494;
@@ -164,12 +163,14 @@ button:disabled { cursor: default; opacity: 0.35; }
   box-shadow: inset 0 0 0 1px var(--surface-3);
 }
 .roll-wrap canvas.keys { position: absolute; left: 0; top: 0; z-index: 1; }
+.roll-wrap canvas.roll { position: absolute; left: 56px; top: 0; }
+/* Transparent layer over the roll canvas: provides the scroll range (spacer) and receives taps. */
 .roll-wrap .scroller {
-  position: absolute; left: 56px; top: 0; right: 0; bottom: 0;
+  position: absolute; left: 56px; top: 0; right: 0; bottom: 0; z-index: 1;
   overflow-x: auto; overflow-y: hidden;
   scrollbar-width: thin; scrollbar-color: #2a2e36 transparent;
 }
-.roll-wrap canvas.roll { display: block; touch-action: pan-x; }
+.roll-wrap .spacer { height: 1px; }
 
 .overlay {
   position: absolute; inset: 0; z-index: 2;
@@ -295,7 +296,7 @@ input[type='range'] { accent-color: var(--note); }
 .seg { flex: 1; display: flex; padding: 3px; border-radius: 14px; background: var(--bg-deep); gap: 2px; }
 .seg button { flex: 1; height: 34px; border: 0; border-radius: 11px; background: transparent; color: var(--text-2); font-family: var(--font-num); font-size: 12px; font-weight: 600; }
 .seg button[aria-pressed='true'] { background: var(--surface-3); color: var(--text); box-shadow: inset 0 0 0 1px #2a2e36; }
-.measure { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; padding: 12px 14px; border-radius: 14px; background: var(--bg-deep); font-family: var(--font-num); font-size: 12px; }
+.measure { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; padding: 12px 14px; border-radius: 14px; background: var(--bg-deep); font-family: var(--font-num); font-size: 12px; }
 .measure dt { color: var(--text-3); }
 .measure dd { margin: 0; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
 

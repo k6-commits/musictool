@@ -21,6 +21,11 @@ export interface SingOptions {
   /** Breath/room noise level relative to the voice peak, in dB. */
   noiseDb?: number;
   vibratoCents?: number;
+  /** Depth (cents below the note) and length of the scoop into each note. Default 35 cents over 60 ms. */
+  scoopCents?: number;
+  scoopSec?: number;
+  /** Overall level, applied before the noise (1 = about -14 dBFS RMS). */
+  gain?: number;
   seed?: number;
 }
 
@@ -41,6 +46,9 @@ export function sing(notes: SungNote[], o: SingOptions): Float32Array {
   const out = new Float32Array(length);
   const sorted = [...notes].sort((a, b) => a.start - b.start);
   const vib = o.vibratoCents ?? 25;
+  const scoop = o.scoopCents ?? 35;
+  const scoopSec = o.scoopSec ?? 0.06;
+  const gain = o.gain ?? 1;
   let phase = 0;
   let idx = 0;
 
@@ -51,7 +59,7 @@ export function sing(notes: SungNote[], o: SingOptions): Float32Array {
     if (!note || t < note.start || t > note.start + note.dur) continue;
     const k = t - note.start;
     let cents = (note.cents ?? 0) + (o.detuneCents ?? 0);
-    if (k < 0.06) cents -= 35 * (1 - k / 0.06); // scoop into the note
+    if (k < scoopSec) cents -= scoop * (1 - k / scoopSec); // scoop into the note
     if (note.dur > 0.5 && k > 0.2) cents += vib * Math.sin(2 * Math.PI * 5.5 * (k - 0.2));
     const f0 = midiToHz(note.pitch + cents / 100);
     phase += (2 * Math.PI * f0) / sr;
@@ -65,7 +73,7 @@ export function sing(notes: SungNote[], o: SingOptions): Float32Array {
       const formant = 1 + 0.8 * Math.exp(-((fh - 750) ** 2) / (2 * 280 ** 2)) + 0.5 * Math.exp(-((fh - 1150) ** 2) / (2 * 300 ** 2));
       s += (formant / h) * Math.sin(h * phase);
     }
-    out[i] = 0.18 * env * s;
+    out[i] = 0.18 * gain * env * s;
   }
 
   if (o.noiseDb !== undefined) {

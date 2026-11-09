@@ -52,6 +52,8 @@ export interface Transcription {
 interface Segment {
   s: number;
   e: number;
+  /** First frame after an onset glide; the note's pitch is measured from here. */
+  settle: number;
   /** Started by a re-articulation (level dip) or after a silence: never merge into the previous note. */
   onset: boolean;
 }
@@ -60,9 +62,7 @@ export function transcribe(frames: PitchFrame[], params: SegmentParams): Transcr
   const n = frames.length;
   const db = new Float32Array(n);
   for (let i = 0; i < n; i++) db[i] = 20 * Math.log10(frames[i].rms + 1e-9);
-  const sortedDb = Array.from(db).sort((a, b) => a - b);
-  const noiseFloor = n ? sortedDb[Math.floor(n * 0.1)] : -90;
-  const gate = Math.max(-65, Math.min(noiseFloor + 12, -35));
+  const { gate, loudDb } = levels(db);
 
   const raw = new Float64Array(n).fill(NaN);
   for (let i = 0; i < n; i++) {
@@ -112,7 +112,7 @@ export function transcribe(frames: PitchFrame[], params: SegmentParams): Transcr
   for (let i = 0; i < n; i++) loud[i] = db[i] >= gate ? 1 : 0;
   const segments = segmentFrames(smooth, frames, loud, params);
   let notes = segments
-    .map((seg) => buildNote(seg, smooth, frames, db, params))
+    .map((seg) => buildNote(seg, smooth, frames, db, loudDb, params))
     .filter((x): x is RawNote & { onset: boolean } => x !== null);
   notes = mergeAndClean(notes, params);
 
@@ -133,6 +133,23 @@ export function transcribe(frames: PitchFrame[], params: SegmentParams): Transcr
   };
 }
 
+/**
+ * Level gate and reference level from the take itself (capture has no automatic gain, so absolute
+ * levels depend on the mic). The gate sits 12 dB over the quietest frames, but never closer than 20 dB
+ * to the loud level: in a take sung without pauses the quietest frames are the voice itself.
+ */
+export function levels(db: Float32Array): { gate: number; loudDb: number } {
+  const n = db.length;
+  if (!n) return { gate: -75, loudDb: -20 };
+  const sorted = Float32Array.from(db).sort();
+  const floor = sorted[Math.floor(n * 0.1)];
+  const loudDb = sorted[Math.min(n - 1, Math.floor(n * 0.95))];
+  return { gate: Math.max(-75, Math.min(floor + 12, loudDb - 20)), loudDb };
+}
+
+/** A note may begin with a glide (scoop or fall) into its pitch for up to this many frames (~220 ms). */
+const GLIDE_FRAMES = 14;
+
 function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array, p: SegmentParams): Segment[] {
   const n = pc.length;
   const segments: Segment[] = [];
@@ -145,9 +162,11 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
       continue;
     }
     const s = i;
-    const vals: number[] = [pc[i]];
+    let settle = i;
+    let glided = false;
+    let vals: number[] = [pc[i]];
     let lastVoiced = i;
-    // Re-articulation of the same pitch: the level falls to half of its peak, then rises again.
+    // Re-articulation of the same pitch: the level dips well below its peak, then rises again.
     // The attack ramp never triggers this because the level only grows there.
     let peak = frames[i].rms;
     let trough = peak;
@@ -168,18 +187,30 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
       quiet = 0;
       dropout = 0;
       // Reference pitch: median of the last ~250 ms, longer than one vibrato cycle.
-      const ref = median(vals.slice(-16));
+      const ref = medianOfLast(vals, 16);
       if (Math.abs(pc[j] - ref) > p.splitSemitones) {
         deviating++;
         if (deviating >= p.holdFrames) {
-          next = j - deviating + 1;
+          const first = j - deviating + 1;
+          if (first - s <= GLIDE_FRAMES && isGlide(pc, s, first, Math.sign(pc[j] - ref))) {
+            // The note started with a scoop or a fall into its pitch: keep the onset, measure from here.
+            // A glide into a note is an attack, so it never merges into a previous note of the same pitch.
+            settle = first;
+            glided = true;
+            vals = [];
+            for (let k = first; k <= j; k++) if (!Number.isNaN(pc[k])) vals.push(pc[k]);
+            deviating = 0;
+            lastVoiced = j;
+            continue;
+          }
+          next = first;
           break;
         }
         continue;
       }
       deviating = 0;
       const level = frames[j].rms;
-      if (trough < peak * 0.5 && level > trough * 2 && level > peak * 0.4 && troughAt > s + 2) {
+      if (trough < peak * 0.6 && level > trough * 1.7 && level > peak * 0.5 && troughAt > s + 2) {
         lastVoiced = troughAt;
         next = troughAt + 1;
         nextOnset = true;
@@ -196,7 +227,7 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
       vals.push(pc[j]);
       lastVoiced = j;
     }
-    segments.push({ s, e: lastVoiced, onset: onsetFlag });
+    segments.push({ s, e: lastVoiced, settle: Math.min(settle, lastVoiced), onset: onsetFlag || glided });
     if (next >= 0) {
       i = next;
       onsetFlag = nextOnset;
@@ -209,20 +240,42 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
   return segments;
 }
 
+/** Frames [from, to) move steadily in direction `dir` (a scoop up into a note, or a fall down into it). */
+function isGlide(pc: Float64Array, from: number, to: number, dir: number): boolean {
+  let prev = NaN;
+  let firstVal = NaN;
+  let steps = 0;
+  let moving = 0;
+  for (let k = from; k < to; k++) {
+    const v = pc[k];
+    if (Number.isNaN(v)) continue;
+    if (Number.isNaN(firstVal)) firstVal = v;
+    else {
+      steps++;
+      if ((v - prev) * dir > 0.005) moving++;
+    }
+    prev = v;
+  }
+  return steps >= 1 && moving / steps >= 0.6 && (prev - firstVal) * dir >= 0.25;
+}
+
 function buildNote(
   seg: Segment,
   pc: Float64Array,
   frames: PitchFrame[],
   db: Float32Array,
+  loudDb: number,
   p: SegmentParams,
 ): (RawNote & { onset: boolean }) | null {
   const vals: number[] = [];
   let confSum = 0;
-  let maxDb = -120;
+  let voicedCount = 0;
+  let maxDb = -180;
   for (let k = seg.s; k <= seg.e; k++) {
     if (Number.isNaN(pc[k])) continue;
-    vals.push(pc[k]);
+    if (k >= seg.settle) vals.push(pc[k]);
     confSum += frames[k].conf;
+    voicedCount++;
     maxDb = Math.max(maxDb, db[k]);
   }
   if (!vals.length) return null;
@@ -233,8 +286,9 @@ function buildNote(
   const spread = stdev(core.length >= 12 ? movingAverage(core, 9) : core);
   const start = Math.max(0, frames[seg.s].t - HOP_SEC / 2);
   const end = frames[seg.e].t + HOP_SEC / 2;
-  const conf = (confSum / len) * clamp(1 - spread / 0.5, 0.2, 1);
-  const velocity = Math.round(clamp(20 + ((maxDb + 50) * 90) / 40, 1, 127));
+  const conf = (confSum / voicedCount) * clamp(1 - spread / 0.5, 0.2, 1);
+  // Velocity follows the note's level relative to the loud parts of the take, not the mic gain.
+  const velocity = Math.round(clamp(100 + (maxDb - loudDb) * 2.5, 20, 127));
   const note: RawNote & { onset: boolean } = {
     id: '',
     start,
@@ -302,21 +356,42 @@ function mergeAndClean(
 }
 
 function median(values: number[]): number {
-  const s = [...values].sort((a, b) => a - b);
+  const s = Float64Array.from(values).sort();
   const m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+const scratch = new Float64Array(32);
+
+/** Median of the last `count` values (count <= 32) without allocating: insertion sort into a scratch buffer. */
+function medianOfLast(values: number[], count: number): number {
+  const n = Math.min(count, values.length);
+  const off = values.length - n;
+  for (let i = 0; i < n; i++) {
+    const v = values[off + i];
+    let k = i - 1;
+    while (k >= 0 && scratch[k] > v) {
+      scratch[k + 1] = scratch[k];
+      k--;
+    }
+    scratch[k + 1] = v;
+  }
+  const m = n >> 1;
+  return n % 2 ? scratch[m] : (scratch[m - 1] + scratch[m]) / 2;
 }
 
 function median3(a: number, b: number, c: number): number {
   return Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
 }
 
+const windowBuf: number[] = [];
+
 function localMedian(values: Float64Array, i: number, radius: number): number {
-  const window: number[] = [];
+  windowBuf.length = 0;
   for (let k = Math.max(0, i - radius); k <= Math.min(values.length - 1, i + radius); k++) {
-    if (!Number.isNaN(values[k])) window.push(values[k]);
+    if (!Number.isNaN(values[k])) windowBuf.push(values[k]);
   }
-  return window.length >= 3 ? median(window) : NaN;
+  return windowBuf.length >= 3 ? medianOfLast(windowBuf, windowBuf.length) : NaN;
 }
 
 function movingAverage(values: number[], width: number): number[] {

@@ -36,11 +36,6 @@ export function snapPitch(pitch: number, key: Key, strength: number): number {
   return Math.abs(pitch - target) <= 0.5 + 0.5 * strength ? target : r;
 }
 
-export function keyLabel(key: Key): string {
-  if (key.mode === 'chromatic') return 'クロマチック';
-  return `${LETTER_NAMES[key.tonic]} ${key.mode === 'major' ? 'メジャー' : 'マイナー'}`;
-}
-
 export function keyShort(key: Key): string {
   if (key.mode === 'chromatic') return 'Chr';
   return LETTER_NAMES[key.tonic] + (key.mode === 'minor' ? 'm' : '');

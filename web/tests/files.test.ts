@@ -1,8 +1,5 @@
 /// <reference types="node" />
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { crc32 as zlibCrc32 } from 'node:zlib';
 import { Midi } from '@tonejs/midi';
 import { describe, expect, it } from 'vitest';
 import { buildFiles, packageFiles, safeName } from '../src/app/files';
@@ -82,21 +79,33 @@ describe('WAV and ZIP', () => {
     expect(crc32(new TextEncoder().encode('123456789'))).toBe(0xcbf43926);
   });
 
-  it('writes a zip that Python can open, with UTF-8 names', () => {
-    const zip = zipStore([
+  it('writes a zip whose directory, headers and CRCs check out, with UTF-8 names', () => {
+    const entries = [
       { name: 'メロディ.mid', data: new Uint8Array([1, 2, 3]) },
       { name: 'voice.wav', data: new Uint8Array(1000).fill(7) },
-    ]);
-    const dir = mkdtempSync(join(tmpdir(), 'mt-zip-'));
-    const path = join(dir, 'x.zip');
-    writeFileSync(path, zip);
-    const out = execFileSync('python3', [
-      '-I',
-      '-c',
-      'import sys, zipfile\nz = zipfile.ZipFile(sys.argv[1])\nassert z.testzip() is None\nprint("|".join(f"{i.filename}:{i.file_size}" for i in z.infolist()))',
-      path,
-    ]).toString().trim();
-    expect(out).toBe('メロディ.mid:3|voice.wav:1000');
+    ];
+    const zip = zipStore(entries);
+    const v = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+    const eocd = zip.length - 22;
+    expect(v.getUint32(eocd, true)).toBe(0x06054b50);
+    expect(v.getUint16(eocd + 10, true)).toBe(entries.length);
+    let cd = v.getUint32(eocd + 16, true);
+    expect(cd + v.getUint32(eocd + 12, true)).toBe(eocd);
+    const dec = new TextDecoder();
+    for (const e of entries) {
+      expect(v.getUint32(cd, true)).toBe(0x02014b50);
+      expect(v.getUint16(cd + 8, true) & 0x0800).toBe(0x0800); // UTF-8 names
+      const size = v.getUint32(cd + 24, true);
+      const nameLen = v.getUint16(cd + 28, true);
+      const local = v.getUint32(cd + 42, true);
+      expect(dec.decode(zip.subarray(cd + 46, cd + 46 + nameLen))).toBe(e.name);
+      expect(v.getUint32(local, true)).toBe(0x04034b50);
+      const dataAt = local + 30 + v.getUint16(local + 26, true) + v.getUint16(local + 28, true);
+      const data = zip.subarray(dataAt, dataAt + size);
+      expect(Array.from(data)).toEqual(Array.from(e.data));
+      expect(v.getUint32(cd + 16, true)).toBe(zlibCrc32(data)); // checked against Node's own CRC-32
+      cd += 46 + nameLen + v.getUint16(cd + 30, true) + v.getUint16(cd + 32, true);
+    }
   });
 });
 
@@ -105,7 +114,7 @@ describe('export files', () => {
     { id: 'n1', pitch: 64, startBeat: 0, endBeat: 1, velocity: 90, flagged: false, raw: {} },
     { id: 'n2', pitch: 62, startBeat: 1, endBeat: 1.5, velocity: 80, flagged: false, raw: {} },
   ] as unknown as ArrangedNote[];
-  const input = { name: 'a/b:c', bpm: 120, key: { tonic: 0, mode: 'major' as const }, program: 0, notes, voice: new Float32Array(100), sampleRate: 48000 };
+  const input = { name: 'a/b:c', bpm: 120, beatsPerBar: 4, key: { tonic: 0, mode: 'major' as const }, program: 0, notes, voice: new Float32Array(100), sampleRate: 48000 };
 
   it('names files safely', () => {
     expect(safeName('a/b:c')).toBe('a-b-c');

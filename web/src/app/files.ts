@@ -10,6 +10,7 @@ export type ExportKind = 'both' | 'midi' | 'wav';
 export interface ExportInput {
   name: string;
   bpm: number;
+  beatsPerBar: number;
   key: Key;
   program: number;
   notes: ArrangedNote[];
@@ -34,7 +35,7 @@ export function buildMidi(input: ExportInput): Uint8Array {
   return writeSmf({
     ppq: PPQ,
     bpm: input.bpm,
-    timeSignature: [4, 4],
+    timeSignature: [input.beatsPerBar, 4],
     keySignature: keySignature(input.key),
     title: input.name,
     trackName: 'Voice Melody',

@@ -1,5 +1,7 @@
 // Pitch tracking at 16 kHz with a 16 ms hop, offline and streaming.
-import { Resampler, resample } from './resample';
+// Both paths produce the same frames: the streaming tracker drops the resampler's filter delay and,
+// when the take ends, flushes and zero-pads exactly like the offline analysis.
+import { Resampler } from './resample';
 import { Yin } from './yin';
 
 export const ANALYSIS_RATE = 16000;
@@ -7,8 +9,6 @@ export const HOP = 256;
 export const HOP_SEC = HOP / ANALYSIS_RATE;
 
 export type InputMode = 'sing' | 'hum' | 'whistle';
-
-export const MODE_LABELS: Record<InputMode, string> = { sing: '歌声', hum: 'ハミング', whistle: '口笛' };
 
 const YIN_SETTINGS: Record<InputMode, { fmin: number; fmax: number; window: number }> = {
   sing: { fmin: 65, fmax: 1100, window: 512 },
@@ -24,76 +24,157 @@ export interface PitchFrame {
   rms: number;
 }
 
+export interface AnalyzeStats {
+  /** Pitch-detection time per 16 ms frame. */
+  millisPerFrame: number;
+}
+
 export function makeYin(mode: InputMode): Yin {
   return new Yin({ sampleRate: ANALYSIS_RATE, ...YIN_SETTINGS[mode] });
 }
 
-export interface AnalyzeStats {
-  frames: number;
-  millis: number;
-  millisPerFrame: number;
+/** Number of 16 kHz samples a take of `inputLength` samples at `rate` is analyzed over. */
+function analysisLength(inputLength: number, rate: number): number {
+  return rate === ANALYSIS_RATE ? inputLength : Math.floor(inputLength / (rate / ANALYSIS_RATE));
 }
 
-/** Offline analysis of a whole take. Yields to the event loop so the page stays responsive. */
+/** Resampler flush length: enough input zeros to push the filter's tail out. */
+function flushLength(r: Resampler): number {
+  return Math.ceil(r.ratio * (r.delay + 2)) + 64;
+}
+
+/**
+ * Offline analysis of a whole take. Resamples in chunks and yields to the event loop every ~30 ms,
+ * so the page stays responsive and the progress bar moves even for long files.
+ */
 export async function analyzePitch(
   samples: Float32Array,
   sampleRate: number,
   mode: InputMode,
   onProgress?: (fraction: number) => void,
-): Promise<{ frames: PitchFrame[]; x16: Float32Array; stats: AnalyzeStats }> {
-  const started = now();
-  const x16 = resample(samples, sampleRate, ANALYSIS_RATE);
+): Promise<{ frames: PitchFrame[]; stats: AnalyzeStats }> {
   const yin = makeYin(mode);
-  const padded = new Float32Array(x16.length + yin.frameLength);
-  padded.set(x16);
+  const want = analysisLength(samples.length, sampleRate);
+  // The analysis signal, followed by zeros so the last frames have a full window.
+  const x16 = new Float32Array(want + yin.frameLength);
   const frames: PitchFrame[] = [];
-  const total = Math.max(1, Math.ceil(x16.length / HOP));
+  let filled = 0;
+  let next = 0;
+  let detectMs = 0;
   let lastYield = now();
-  for (let start = 0, i = 0; start < x16.length; start += HOP, i++) {
-    const r = yin.detect(padded, start);
-    frames.push({ t: (start + yin.window / 2) / ANALYSIS_RATE, f0: r.f0, conf: r.conf, rms: r.rms });
-    if (now() - lastYield > 30) {
-      onProgress?.(i / total);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      lastYield = now();
+
+  const maybeYield = async (fraction: number) => {
+    if (now() - lastYield < 30) return;
+    onProgress?.(fraction);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lastYield = now();
+  };
+  const analyzeAvailable = async () => {
+    while (next < want && (next + yin.frameLength <= filled || filled >= want)) {
+      const t0 = now();
+      const r = yin.detect(x16, next);
+      detectMs += now() - t0;
+      frames.push({ t: (next + yin.window / 2) / ANALYSIS_RATE, f0: r.f0, conf: r.conf, rms: r.rms });
+      next += HOP;
+      if ((next / HOP) % 64 === 0) await maybeYield(next / Math.max(1, want));
     }
+  };
+
+  if (sampleRate === ANALYSIS_RATE) {
+    x16.set(samples);
+    filled = want;
+  } else {
+    const r = new Resampler(sampleRate, ANALYSIS_RATE);
+    const skip = Math.round(r.delay);
+    let produced = 0;
+    const write = (out: Float32Array) => {
+      for (let i = 0; i < out.length; i++) {
+        const g = produced + i - skip;
+        if (g >= 0 && g < want) x16[g] = out[i];
+      }
+      produced += out.length;
+      filled = Math.min(want, Math.max(0, produced - skip));
+    };
+    const CHUNK = 16384;
+    for (let p = 0; p < samples.length; p += CHUNK) {
+      write(r.process(samples.subarray(p, Math.min(samples.length, p + CHUNK))));
+      await analyzeAvailable();
+      await maybeYield(next / Math.max(1, want));
+    }
+    write(r.process(new Float32Array(flushLength(r))));
+    filled = want;
   }
+  await analyzeAvailable();
   onProgress?.(1);
-  const millis = now() - started;
-  return { frames, x16, stats: { frames: frames.length, millis, millisPerFrame: millis / Math.max(1, frames.length) } };
+  return { frames, stats: { millisPerFrame: detectMs / Math.max(1, frames.length) } };
 }
 
-/** Streaming tracker for live display while singing. */
+/** Streaming tracker for live display while singing; `finish()` completes the take's frames. */
 export class LivePitch {
   private readonly resampler: Resampler;
-  private yin: Yin;
+  private readonly yin: Yin;
+  private readonly skip: number;
+  private skipped = 0;
   private buffer = new Float32Array(0);
   private read = 0;
   private produced = 0;
-  lastMillisPerFrame = 0;
+  private written = 0;
+  private inputSamples = 0;
+  private detectMs = 0;
 
-  constructor(inputRate: number, mode: InputMode) {
+  constructor(
+    private readonly inputRate: number,
+    mode: InputMode,
+  ) {
     this.resampler = new Resampler(inputRate, ANALYSIS_RATE);
     this.yin = makeYin(mode);
+    this.skip = Math.round(this.resampler.delay);
   }
 
-  setMode(mode: InputMode): void {
-    this.yin = makeYin(mode);
+  get millisPerFrame(): number {
+    return this.detectMs / Math.max(1, this.produced);
   }
 
   push(chunk: Float32Array): PitchFrame[] {
-    const y = this.resampler.process(chunk);
-    const merged = new Float32Array(this.buffer.length - this.read + y.length);
+    this.inputSamples += chunk.length;
+    this.append(this.resampler.process(chunk), Infinity);
+    return this.run(Infinity);
+  }
+
+  /** The take is over: flush the resampler, pad with zeros and return the remaining frames. */
+  finish(): PitchFrame[] {
+    const want = analysisLength(this.inputSamples, this.inputRate);
+    this.append(this.resampler.process(new Float32Array(flushLength(this.resampler))), want);
+    if (this.written < want) this.append(new Float32Array(want - this.written), want);
+    this.append(new Float32Array(this.yin.frameLength), Infinity, true);
+    return this.run(Math.ceil(want / HOP));
+  }
+
+  private append(y: Float32Array, limit: number, padding = false): void {
+    let from = 0;
+    if (!padding && this.skipped < this.skip) {
+      from = Math.min(this.skip - this.skipped, y.length);
+      this.skipped += from;
+    }
+    const to = padding ? y.length : Math.min(y.length, from + Math.max(0, limit - this.written));
+    if (to <= from) return;
+    const add = y.subarray(from, to);
+    if (!padding) this.written += add.length;
+    const keep = this.buffer.length - this.read;
+    const merged = new Float32Array(keep + add.length);
     merged.set(this.buffer.subarray(this.read));
-    merged.set(y, this.buffer.length - this.read);
+    merged.set(add, keep);
     this.buffer = merged;
     this.read = 0;
+  }
+
+  private run(maxFrames: number): PitchFrame[] {
     const out: PitchFrame[] = [];
     const len = this.yin.frameLength;
-    while (this.read + len <= this.buffer.length) {
+    while (this.produced < maxFrames && this.read + len <= this.buffer.length) {
       const t0 = now();
       const r = this.yin.detect(this.buffer, this.read);
-      this.lastMillisPerFrame = now() - t0;
+      this.detectMs += now() - t0;
       out.push({ t: (this.produced * HOP + this.yin.window / 2) / ANALYSIS_RATE, f0: r.f0, conf: r.conf, rms: r.rms });
       this.read += HOP;
       this.produced++;

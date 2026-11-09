@@ -47,18 +47,43 @@ describe('arrange', () => {
     const out = arrange([raw('a', 60, 0, 0.7), raw('b', 62, 0.5, 1)], { ...base, quant: 0 });
     expect(out[0].endBeat).toBeLessThanOrEqual(out[1].startBeat);
   });
+
+  it('never stacks notes when quantizing pulls them onto the same slot', () => {
+    // Sixteenth notes at 120 BPM (0.125 s each) quantized hard to quarter notes.
+    const run = [60, 62, 64, 65, 67, 65, 64, 62].map((p, i) => raw(`n${i}`, p, i * 0.125, i * 0.125 + 0.12));
+    for (const grid of [0.5, 1]) {
+      const out = arrange(run, { ...base, quant: 1, grid });
+      expect(out).toHaveLength(run.length);
+      for (let i = 0; i < out.length - 1; i++) {
+        expect(out[i + 1].startBeat).toBeGreaterThan(out[i].startBeat);
+        expect(out[i].endBeat).toBeLessThanOrEqual(out[i + 1].startBeat);
+        expect(out[i].endBeat).toBeGreaterThan(out[i].startBeat);
+      }
+    }
+  });
 });
 
 describe('tempo guess', () => {
-  it.each([84, 100, 128])('finds %s BPM from a sung rhythm', (bpm) => {
-    const beats = [0, 1, 1.5, 2, 3, 4, 4.5, 5, 6, 7, 7.5, 8];
-    let seed = 5;
+  const beats = [0, 1, 1.5, 2, 3, 4, 4.5, 5, 6, 7, 7.5, 8];
+  const sung = (bpm: number, seed: number, firstLate = 0) => {
     const jitter = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5) * 0.03;
-    const onsets = beats.map((b) => 0.4 + (b * 60) / bpm + jitter());
-    const g = estimateTempo(onsets);
+    return beats.map((b, i) => 0.4 + (b * 60) / bpm + jitter() + (i === 0 ? firstLate : 0));
+  };
+
+  it.each([84, 100, 128])('finds %s BPM and the downbeat from a sung rhythm', (bpm) => {
+    const g = estimateTempo(sung(bpm, 5));
     expect(g).not.toBeNull();
     expect(Math.abs(g!.bpm - bpm)).toBeLessThanOrEqual(2);
-    expect(g!.zero).toBeCloseTo(onsets[0], 6);
+    expect(Math.abs(g!.zero - 0.4)).toBeLessThan(0.03);
+  });
+
+  it('is not thrown off by a first note detected late', () => {
+    let right = 0;
+    for (let seed = 1; seed <= 20; seed++) {
+      const g = estimateTempo(sung(128, seed, 0.05))!;
+      if (Math.abs(g.bpm - 128) <= 1 && Math.abs(g.zero - 0.4) < 0.03) right++;
+    }
+    expect(right).toBeGreaterThanOrEqual(18);
   });
 
   it('needs a few notes', () => {

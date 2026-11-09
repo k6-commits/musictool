@@ -42,41 +42,47 @@ export class Resampler {
   }
 
   process(input: Float32Array): Float32Array {
-    let filtered: Float32Array;
-    if (this.taps) {
-      const h = this.taps;
-      const len = h.length;
-      const ext = new Float32Array(this.history.length + input.length);
+    // Virtual buffer: the filtered samples carried over from the last call, then this call's filtered input.
+    // Filtered samples are computed only where the interpolator reads them (every third one at 48 kHz).
+    const pending = this.pending;
+    const P = pending.length;
+    const total = P + input.length;
+    const h = this.taps;
+    const ext = h ? new Float32Array(this.history.length + input.length) : null;
+    if (ext) {
       ext.set(this.history);
       ext.set(input, this.history.length);
-      filtered = new Float32Array(input.length);
-      for (let n = 0; n < input.length; n++) {
-        const base = n + len - 1;
-        let s = 0;
-        for (let k = 0; k < len; k++) s += h[k] * ext[base - k];
-        filtered[n] = s;
-      }
-      this.history = ext.slice(ext.length - (len - 1));
-    } else {
-      filtered = input;
     }
+    const filtered = h ? new Float32Array(input.length) : input;
+    const ready = h ? new Uint8Array(input.length) : null;
+    const at = (b: number): number => {
+      if (b < P) return pending[b];
+      const n = b - P;
+      if (h && ext && ready && !ready[n]) {
+        const base = n + h.length - 1;
+        let s = 0;
+        for (let k = 0; k < h.length; k++) s += h[k] * ext[base - k];
+        filtered[n] = s;
+        ready[n] = 1;
+      }
+      return filtered[n];
+    };
 
-    const buf = new Float32Array(this.pending.length + filtered.length);
-    buf.set(this.pending);
-    buf.set(filtered, this.pending.length);
-
-    const out = new Float32Array(Math.max(0, Math.ceil((buf.length - this.pos) / this.ratio) + 1));
+    const out = new Float32Array(Math.max(0, Math.ceil((total - this.pos) / this.ratio) + 1));
     let count = 0;
     let pos = this.pos;
-    while (pos + 1 < buf.length) {
+    while (pos + 1 < total) {
       const i = Math.floor(pos);
       const f = pos - i;
-      out[count++] = buf[i] * (1 - f) + buf[i + 1] * f;
+      out[count++] = f === 0 ? at(i) : at(i) * (1 - f) + at(i + 1) * f;
       pos += this.ratio;
     }
-    const drop = Math.min(Math.floor(pos), buf.length);
-    this.pending = buf.slice(drop);
+    const drop = Math.min(Math.floor(pos), total);
+    const rest = new Float32Array(total - drop);
+    for (let b = drop; b < total; b++) rest[b - drop] = at(b);
+    this.pending = rest;
     this.pos = pos - drop;
+    if (h && ext) this.history = ext.slice(ext.length - (h.length - 1));
     return out.subarray(0, count);
   }
 }

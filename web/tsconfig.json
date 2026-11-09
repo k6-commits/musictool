@@ -18,7 +18,6 @@
     "src",
     "tests",
     "eval",
-    "e2e/**/*.ts",
-    "eval/**/*.ts"
+    "e2e"
   ]
 }
