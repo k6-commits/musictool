@@ -48,6 +48,20 @@ describe('arrange', () => {
     expect(out[0].endBeat).toBeLessThanOrEqual(out[1].startBeat);
   });
 
+  it('gives a contested grid slot to the note sung closest to it', () => {
+    // 120 BPM (0.5 s per beat): a grace note 60 ms before beat 2, the main note exactly on beat 2.
+    const out = arrange([raw('a', 60, 0, 0.45), raw('grace', 62, 0.94, 1), raw('main', 64, 1, 1.5)], { ...base, quant: 1, grid: 0.5 });
+    expect(out.map((n) => [n.id, n.startBeat])).toEqual([
+      ['a', 0],
+      ['grace', 1.88],
+      ['main', 2],
+    ]);
+    // Sixteenths quantized hard to quarters stay where they were sung instead of becoming 1/64 stubs.
+    const run = [60, 62, 64, 65].map((p, i) => raw(`s${i}`, p, 0.5 + i * 0.125, 0.5 + i * 0.125 + 0.12));
+    const q = arrange(run, { ...base, quant: 1, grid: 1 });
+    expect(q.map((n) => n.startBeat)).toEqual([1, 1.25, 1.5, 2]);
+  });
+
   it('never stacks notes when quantizing pulls them onto the same slot', () => {
     // Sixteenth notes at 120 BPM (0.125 s each) quantized hard to quarter notes.
     const run = [60, 62, 64, 65, 67, 65, 64, 62].map((p, i) => raw(`n${i}`, p, i * 0.125, i * 0.125 + 0.12));
@@ -67,7 +81,10 @@ describe('tempo guess', () => {
   const beats = [0, 1, 1.5, 2, 3, 4, 4.5, 5, 6, 7, 7.5, 8];
   const sung = (bpm: number, seed: number, firstLate = 0) => {
     const jitter = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5) * 0.03;
-    return beats.map((b, i) => 0.4 + (b * 60) / bpm + jitter() + (i === 0 ? firstLate : 0));
+    return beats.map((b, i) => {
+      const start = 0.4 + (b * 60) / bpm + jitter() + (i === 0 ? firstLate : 0);
+      return { start, end: start + 0.2 };
+    });
   };
 
   it.each([84, 100, 128])('finds %s BPM and the downbeat from a sung rhythm', (bpm) => {
@@ -86,7 +103,17 @@ describe('tempo guess', () => {
     expect(right).toBeGreaterThanOrEqual(18);
   });
 
+  it('never puts bar 1 inside or after a short first note (pickup)', () => {
+    for (const bpm of [90, 100, 120, 130]) {
+      const spb = 60 / bpm;
+      const notes = sung(bpm, 7).slice(1);
+      const pickup = { start: 0.4 + spb - 0.2 * spb, end: 0.4 + spb - 0.2 * spb + 0.11 };
+      const g = estimateTempo([pickup, ...notes])!;
+      expect(g.zero, `${bpm} BPM`).toBeLessThanOrEqual(pickup.start + 0.3 * (pickup.end - pickup.start) + 1e-9);
+    }
+  });
+
   it('needs a few notes', () => {
-    expect(estimateTempo([0.1, 0.6])).toBeNull();
+    expect(estimateTempo([{ start: 0.1, end: 0.3 }, { start: 0.6, end: 0.8 }])).toBeNull();
   });
 });

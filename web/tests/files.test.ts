@@ -75,6 +75,14 @@ describe('WAV and ZIP', () => {
     expect(v.getInt16(44 + 2 * 5, true)).toBe(32767);
   });
 
+  it('interleaves several channels', () => {
+    const wav = encodeWav([new Float32Array([0.5, 0]), new Float32Array([0, -0.5])], 8000);
+    const v = new DataView(wav.buffer);
+    expect(v.getUint16(22, true)).toBe(2);
+    expect(v.getUint32(40, true)).toBe(8);
+    expect([0, 1, 2, 3].map((i) => v.getInt16(44 + i * 2, true))).toEqual([16383, 0, 0, -16384]);
+  });
+
   it('computes CRC-32', () => {
     expect(crc32(new TextEncoder().encode('123456789'))).toBe(0xcbf43926);
   });

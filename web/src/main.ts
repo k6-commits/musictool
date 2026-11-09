@@ -38,14 +38,18 @@ function framed(): boolean {
   }
 }
 
+/** In the claude.ai viewer (a sandboxed cross-origin frame) only the host can save files, and only as .zip. */
+const savesThroughHost = inArtifact && framed();
+
 /** Can this page ask for the microphone? (The claude.ai viewer frames pages without it.) */
 function micAllowed(): boolean {
   if (!MicCapture.supported() || !window.isSecureContext) return false;
   const doc = document as unknown as { permissionsPolicy?: FeaturePolicy; featurePolicy?: FeaturePolicy };
   const policy = doc.permissionsPolicy ?? doc.featurePolicy;
   if (policy && typeof policy.allowsFeature === 'function') return policy.allowsFeature('microphone');
-  // No policy API (Safari, Firefox): a cross-origin frame gets no microphone unless the parent allows it.
-  return !framed();
+  // No policy API (Safari, Firefox): offer REC except in the claude.ai viewer, which never grants the
+  // microphone; anywhere else a refusal is handled when the microphone is actually requested.
+  return !savesThroughHost;
 }
 
 // ---------------------------------------------------------------- state
@@ -59,21 +63,32 @@ type Phase = 'idle' | 'arming' | 'count' | 'rec' | 'analyzing';
 type Source = 'mic' | 'file' | 'sample';
 
 interface Take {
-  id: number;
   name: string;
   source: Source;
-  /** Mono samples (a view of `buffer`, so the audio is kept once). */
-  audio: Float32Array;
+  /**
+   * The take's mono audio, kept once. Read it with samples(t) at the moment it is needed: arrays returned
+   * earlier by getChannelData() are detached once the buffer has been played (Web Audio "acquire the
+   * content", implemented by Firefox).
+   */
   buffer: AudioBuffer;
   sampleRate: number;
   /** Seconds in `audio` where bar 1 starts. */
   zero: number;
   mode: InputMode;
-  frames: PitchFrame[];
   trans: Transcription;
   stats: AnalyzeStats;
   /** Waveform-lane envelope, one value per frame (0..1). */
   peaks: Float32Array;
+  /** Lowest and highest pitch of the voice curve (NaN when silent), for the roll's range. */
+  curveRange: [number, number];
+}
+
+function samples(t: Take): Float32Array {
+  return t.buffer.getChannelData(0);
+}
+
+function monoBuffer(length: number, sampleRate: number): AudioBuffer {
+  return new AudioBuffer({ length: Math.max(1, length), sampleRate, numberOfChannels: 1 });
 }
 
 interface Snapshot {
@@ -117,7 +132,7 @@ function loadPrefs(): Prefs {
     const raw = JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Record<string, unknown>;
     if (raw.notation === 'letter' || raw.notation === 'doremi') p.notation = raw.notation;
     if (raw.middleC === 3 || raw.middleC === 4 || raw.middleC === 5) p.middleC = raw.middleC;
-    if (raw.mode === 'sing' || raw.mode === 'hum' || raw.mode === 'whistle') p.mode = raw.mode;
+    if (typeof raw.mode === 'string' && Object.hasOwn(SEGMENT_PARAMS, raw.mode)) p.mode = raw.mode as InputMode;
     if (typeof raw.countIn === 'boolean') p.countIn = raw.countIn;
     if (typeof raw.metronome === 'boolean') p.metronome = raw.metronome;
     if (typeof raw.latencyMs === 'number' && Number.isFinite(raw.latencyMs)) p.latencyMs = Math.max(-100, Math.min(200, raw.latencyMs));
@@ -163,13 +178,12 @@ const S = {
   undoAt: 0,
   exportKind: 'both' as ExportKind,
   mic: micAllowed(),
-  /** The last microphone used, for the measurement panel. */
-  lastInput: null as { kind: string; latencyMs: number } | null,
+  /** The last microphone used, for the measurement panel (device latency, without the manual correction). */
+  lastInput: null as { kind: string; deviceLatencyMs: number } | null,
 };
 
 let ctx: AudioContext | null = null;
 let player: Player | null = null;
-let takeSeq = 0;
 
 function audio(): AudioContext {
   if (!ctx) ctx = new AudioContext({ latencyHint: 'interactive' });
@@ -181,8 +195,9 @@ function getPlayer(): Player {
   return player;
 }
 
+/** Output latency: the context's own processing (baseLatency) plus the system's (outputLatency). */
 function outputLatency(ac: AudioContext): number {
-  return ac.outputLatency || ac.baseLatency || 0;
+  return (ac.baseLatency || 0) + (ac.outputLatency || 0);
 }
 
 // ---------------------------------------------------------------- elements
@@ -338,11 +353,16 @@ function undo(): void {
 
 // ---------------------------------------------------------------- arrangement
 
-/** The take's notes on the song timeline (bar 1 = 0 s). */
+/** Notes moved onto the song timeline (bar 1 = 0 s) by `offset` seconds; notes over before bar 1 are dropped. */
+function toSongTime(notes: RawNote[], offset: number): RawNote[] {
+  return notes
+    .filter((n) => n.end + offset > 0.02)
+    .map((n) => ({ ...n, start: Math.max(0, n.start + offset), end: n.end + offset }));
+}
+
+/** The take's notes on the song timeline. */
 function shiftedNotes(t: Take): RawNote[] {
-  return t.trans.notes
-    .filter((n) => n.end > t.zero + 0.02)
-    .map((n) => ({ ...n, start: Math.max(0, n.start - t.zero), end: n.end - t.zero }));
+  return toSongTime(t.trans.notes, -t.zero);
 }
 
 function arranged(): ArrangedNote[] {
@@ -385,14 +405,17 @@ function collectEdits(t: Take): CarriedEdits {
   return { fixed, deleted };
 }
 
-/** Apply carried edits to the note that overlaps each edited span the most (at least half of the shorter). */
+/**
+ * Apply carried edits to the note that overlaps each edited span the most, covering at least half of both
+ * (so an edit on a short blip is dropped rather than applied to a long note that absorbed it).
+ */
 function applyEdits(notes: RawNote[], carried: CarriedEdits): void {
   const match = (span: { start: number; end: number }) => {
     let best: RawNote | null = null;
     let bestOverlap = 0;
     for (const n of notes) {
       const overlap = Math.min(n.end, span.end) - Math.max(n.start, span.start);
-      const need = 0.5 * Math.min(n.end - n.start, span.end - span.start);
+      const need = 0.5 * Math.max(n.end - n.start, span.end - span.start);
       if (overlap >= need && overlap > bestOverlap) {
         best = n;
         bestOverlap = overlap;
@@ -415,8 +438,8 @@ function applyEdits(notes: RawNote[], carried: CarriedEdits): void {
 interface TakeInput {
   name: string;
   source: Source;
-  audio: Float32Array;
-  sampleRate: number;
+  /** Mono audio. The take keeps this buffer (no copy). */
+  buffer: AudioBuffer;
   /** Bar 1 and tempo when known (a take recorded to the click); otherwise both are guessed from the notes. */
   timing?: { zero: number; bpm: number };
   /** Pitch frames already computed with the current input mode (live, while recording). */
@@ -445,14 +468,14 @@ async function loadTake(input: TakeInput): Promise<void> {
     const mode = P.mode;
     const { frames, stats } =
       input.analysis ??
-      (await analyzePitch(input.audio, input.sampleRate, mode, (p) => {
+      (await analyzePitch(input.buffer.getChannelData(0), input.buffer.sampleRate, mode, (p) => {
         el.busyBar.style.width = `${Math.round(p * 100)}%`;
       }));
     const trans = transcribe(frames, SEGMENT_PARAMS[mode]);
     let zero = input.timing?.zero ?? 0;
     let bpm = input.timing?.bpm ?? S.bpm;
     if (!input.timing) {
-      const guess = estimateTempo(trans.notes.map((n) => n.start));
+      const guess = estimateTempo(trans.notes);
       if (guess) {
         bpm = guess.bpm;
         zero = guess.zero;
@@ -460,22 +483,23 @@ async function loadTake(input: TakeInput): Promise<void> {
         zero = trans.notes[0].start;
       }
     }
-    // Keep the audio once: in the AudioBuffer used for playback, read back through a view.
-    const buffer = new AudioBuffer({ length: Math.max(1, input.audio.length), sampleRate: input.sampleRate, numberOfChannels: 1 });
-    buffer.copyToChannel(input.audio as Float32Array<ArrayBuffer>, 0);
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const p of trans.curve) {
+      if (p < lo) lo = p;
+      if (p > hi) hi = p;
+    }
     S.take = {
-      id: ++takeSeq,
       name: input.name,
       source: input.source,
-      audio: buffer.getChannelData(0),
-      buffer,
-      sampleRate: input.sampleRate,
+      buffer: input.buffer,
+      sampleRate: input.buffer.sampleRate,
       zero,
       mode,
-      frames,
       trans,
       stats,
       peaks: envelopeOf(frames),
+      curveRange: Number.isFinite(lo) ? [lo, hi] : [NaN, NaN],
     };
     S.bpm = Math.max(40, Math.min(240, bpm));
     S.fixed = {};
@@ -504,7 +528,10 @@ async function loadTake(input: TakeInput): Promise<void> {
 async function loadSample(): Promise<void> {
   if (S.phase !== 'idle') return;
   const sr = 48000;
-  await loadTake({ name: 'サンプル', source: 'sample', audio: makeSample(sr), sampleRate: sr, timing: { zero: 0, bpm: SAMPLE_BPM } });
+  const voice = makeSample(sr);
+  const buffer = monoBuffer(voice.length, sr);
+  buffer.getChannelData(0).set(voice);
+  await loadTake({ name: 'サンプル', source: 'sample', buffer, timing: { zero: 0, bpm: SAMPLE_BPM } });
 }
 
 async function loadFile(file: File): Promise<void> {
@@ -522,27 +549,25 @@ async function loadFile(file: File): Promise<void> {
     toast('6 分までの音声に対応しています', 'warn');
     return;
   }
-  const mono = new Float32Array(decoded.length);
-  for (let c = 0; c < decoded.numberOfChannels; c++) {
-    const ch = decoded.getChannelData(c);
-    for (let i = 0; i < ch.length; i++) mono[i] += ch[i] / decoded.numberOfChannels;
+  // Mono files are used as decoded; other files are mixed down once, straight into the take's buffer.
+  let buffer = decoded;
+  if (decoded.numberOfChannels > 1) {
+    buffer = monoBuffer(decoded.length, decoded.sampleRate);
+    const mono = buffer.getChannelData(0);
+    for (let c = 0; c < decoded.numberOfChannels; c++) {
+      const ch = decoded.getChannelData(c);
+      for (let i = 0; i < ch.length; i++) mono[i] += ch[i] / decoded.numberOfChannels;
+    }
   }
   const name = file.name.replace(/\.[^.]+$/, '') || 'voice';
-  await loadTake({ name, source: 'file', audio: mono, sampleRate: decoded.sampleRate });
+  await loadTake({ name, source: 'file', buffer });
 }
 
 /** Re-analyze the current take with the current input mode, keeping hand edits. */
 async function reanalyze(): Promise<void> {
   const t = S.take;
   if (!t || S.phase !== 'idle' || t.mode === P.mode) return;
-  await loadTake({
-    name: t.name,
-    source: t.source,
-    audio: t.audio,
-    sampleRate: t.sampleRate,
-    timing: { zero: t.zero, bpm: S.bpm },
-    carried: collectEdits(t),
-  });
+  await loadTake({ name: t.name, source: t.source, buffer: t.buffer, timing: { zero: t.zero, bpm: S.bpm }, carried: collectEdits(t) });
 }
 
 // ---------------------------------------------------------------- recording
@@ -638,8 +663,9 @@ async function startRecording(): Promise<void> {
   const spb = 60 / S.bpm;
   const t0 = ac.currentTime + 0.15;
   const countBeats = P.countIn ? BEATS_PER_BAR : 0;
-  const latency = outputLatency(ac) + capture.inputLatency + P.latencyMs / 1000;
-  S.lastInput = { kind: capture.kind === 'worklet' ? 'Worklet' : 'ScriptProcessor', latencyMs: Math.round(latency * 1000) };
+  const deviceLatency = outputLatency(ac) + capture.inputLatency;
+  const latency = deviceLatency + P.latencyMs / 1000;
+  S.lastInput = { kind: capture.kind === 'worklet' ? 'Worklet' : 'ScriptProcessor', deviceLatencyMs: Math.round(deviceLatency * 1000) };
   const r: Rec = {
     capture,
     recorder: new TakeRecorder(),
@@ -699,8 +725,12 @@ async function startRecording(): Promise<void> {
       if (voiced) r.range = [Math.min(r.range[0], Math.floor(pitch) - 2), Math.max(r.range[1], Math.ceil(pitch) + 2)];
     }
   });
-  // Clicks are scheduled well ahead from a timer, so they keep going in a background tab.
-  r.clickTimer = window.setInterval(() => scheduleClicks(r), 250);
+  // Clicks, the count-in and the length cap run from a timer on the audio clock, so they keep going
+  // in a background tab (animation frames stop there).
+  r.clickTimer = window.setInterval(() => {
+    scheduleClicks(r);
+    advanceRecording(r);
+  }, 250);
   scheduleClicks(r);
   S.phase = countBeats ? 'count' : 'rec';
   S.playheadBeat = 0;
@@ -722,35 +752,55 @@ function scheduleClicks(r: Rec): void {
   }
 }
 
+/** Silence the clicks scheduled at or after `from` (context time). */
+function cancelClicks(r: Rec, from: number): void {
+  for (const c of r.clicks) {
+    if (c.time < from) continue;
+    try {
+      c.osc.stop();
+    } catch {
+      /* already stopped */
+    }
+  }
+  r.clicks = r.clicks.filter((c) => c.time < from);
+}
+
+/** The count-in ending and the length cap, from the audio clock (called by the timer and every frame). */
+function advanceRecording(r: Rec): void {
+  if (rec !== r) return;
+  const now = audio().currentTime;
+  if (S.phase === 'count' && now >= r.zeroTime) {
+    S.phase = 'rec';
+    el.count.hidden = true;
+    renderTransport();
+  }
+  if (S.phase === 'rec' && now - r.zeroTime > MAX_RECORD_SECONDS) {
+    toast('10 分で録音を止めました', 'warn');
+    void stopRecording();
+  }
+}
+
 /** Live preview notes: the last ~20 s are re-transcribed; earlier notes are kept as they were. */
 const LIVE_WINDOW_FRAMES = 1250;
 
+/** What the screen shows while recording: the count-in number, the playhead and live notes (every frame). */
 function updateRecording(r: Rec): void {
+  advanceRecording(r);
+  if (rec !== r) return;
   const now = audio().currentTime;
   if (S.phase === 'count') {
-    if (now >= r.zeroTime) {
-      S.phase = 'rec';
-      el.count.hidden = true;
-      renderTransport();
-    } else {
-      const remaining = r.countBeats - Math.max(0, Math.floor((now - r.t0) / r.spb));
-      if (remaining !== r.shownCount && now >= r.t0) {
-        r.shownCount = remaining;
-        el.count.hidden = false;
-        el.countNum.textContent = String(remaining);
-        el.countNum.classList.remove('beat');
-        void el.countNum.offsetWidth;
-        el.countNum.classList.add('beat');
-      }
+    const remaining = r.countBeats - Math.max(0, Math.floor((now - r.t0) / r.spb));
+    if (remaining !== r.shownCount && now >= r.t0) {
+      r.shownCount = remaining;
+      el.count.hidden = false;
+      el.countNum.textContent = String(remaining);
+      el.countNum.classList.remove('beat');
+      void el.countNum.offsetWidth;
+      el.countNum.classList.add('beat');
     }
   }
   if (S.phase !== 'rec') return;
   S.playheadBeat = Math.max(0, (now - r.zeroTime) / r.spb);
-  if (now - r.zeroTime > MAX_RECORD_SECONDS) {
-    toast('10 分で録音を止めました', 'warn');
-    void stopRecording();
-    return;
-  }
   const wall = performance.now();
   if (wall - r.lastTranscribe > 300 && r.frames.length > 10) {
     r.lastTranscribe = wall;
@@ -765,11 +815,7 @@ function updateRecording(r: Rec): void {
       const fresh = transcribe(r.frames.slice(from), params).notes.filter((n) => n.start >= edge);
       r.rawNotes = kept.concat(fresh);
     }
-    const offset = songOffset(r);
-    const shifted = r.rawNotes
-      .map((n, i) => ({ ...n, id: `l${i}`, start: n.start + offset, end: n.end + offset }))
-      .filter((n) => n.end > 0)
-      .map((n) => ({ ...n, start: Math.max(0, n.start) }));
+    const shifted = toSongTime(r.rawNotes, songOffset(r)).map((n, i) => ({ ...n, id: `l${i}` }));
     r.rollNotes = arrange(shifted, { bpm: r.bpm, key: S.key, snap: S.snap, quant: 0, grid: S.grid, fixed: {}, deleted: [] }).map((n) => ({
       id: n.id,
       pitch: n.pitch,
@@ -795,47 +841,45 @@ async function stopRecording(): Promise<void> {
   }
   rec = null;
   window.clearInterval(r.clickTimer);
-  for (const c of r.clicks) {
-    try {
-      c.osc.stop();
-    } catch {
-      /* already stopped */
-    }
-  }
-  r.capture.listen(null);
+  cancelClicks(r, -Infinity);
   r.capture.close();
   el.count.hidden = true;
-  const wasCounting = S.phase === 'count';
+  // Decided by the clock, not the phase: in a background tab the phase may not have caught up yet.
+  const stillCounting = audio().currentTime < r.zeroTime;
   S.phase = 'idle';
   S.playheadBeat = null;
-  if (wasCounting) {
-    renderTransport();
-    refresh();
-    return;
-  }
-  const data = r.recorder.merge();
   const zero = Math.max(0, -songOffset(r));
-  if (data.length / r.sampleRate - zero < 0.4) {
-    toast('短すぎます', 'warn');
+  if (stillCounting || r.recorder.samples / r.sampleRate - zero < 0.4) {
+    if (!stillCounting) toast('短すぎます', 'warn');
     renderTransport();
     refresh();
     return;
   }
+  // The take goes straight into the buffer it is played from (no intermediate copy).
+  const buffer = monoBuffer(r.recorder.samples, r.sampleRate);
+  r.recorder.moveInto(buffer.getChannelData(0));
   // The live tracker already analyzed every chunk; finishing it gives the frames an offline pass would.
   const frames = r.frames.concat(r.live.finish());
   await loadTake({
     name: stampName(),
     source: 'mic',
-    audio: data,
-    sampleRate: r.sampleRate,
+    buffer,
     timing: { zero, bpm: r.bpm },
-    analysis: r.mode === P.mode ? { frames, stats: { millisPerFrame: r.live.millisPerFrame } } : undefined,
+    analysis: { frames, stats: { millisPerFrame: r.live.millisPerFrame } },
   });
+}
+
+function isRecording(): boolean {
+  return S.phase === 'arming' || S.phase === 'count' || S.phase === 'rec';
 }
 
 // ---------------------------------------------------------------- playback
 
+/** What the player is playing: the song, or the original voice under one note (原音). */
+let playing: 'song' | 'clip' | null = null;
+
 function playbackEnded(): void {
+  playing = null;
   S.playheadBeat = null;
   renderTransport();
   renderNow();
@@ -855,6 +899,7 @@ function play(): void {
     instrument: P.instrument,
     onEnd: playbackEnded,
   });
+  playing = 'song';
   renderTransport();
   loop();
 }
@@ -862,13 +907,14 @@ function play(): void {
 function stopPlayback(): void {
   if (player?.playing) {
     player.stop();
+    playing = null;
     S.playheadBeat = null;
     renderTransport();
   }
 }
 
 function togglePlay(): void {
-  if (S.phase === 'arming' || S.phase === 'count' || S.phase === 'rec') {
+  if (isRecording()) {
     void stopRecording();
     return;
   }
@@ -880,7 +926,7 @@ function togglePlay(): void {
 }
 
 function toggleRec(): void {
-  if (S.phase === 'arming' || S.phase === 'count' || S.phase === 'rec') void stopRecording();
+  if (isRecording()) void stopRecording();
   else if (S.phase === 'idle') void startRecording();
 }
 
@@ -902,6 +948,7 @@ function listenSelected(): void {
     instrument: P.instrument,
     onEnd: playbackEnded,
   });
+  playing = 'clip';
   renderTransport();
   loop();
 }
@@ -923,7 +970,7 @@ function refresh(): void {
 }
 
 function renderTransport(): void {
-  const recording = S.phase === 'arming' || S.phase === 'rec' || S.phase === 'count';
+  const recording = isRecording();
   el.title.textContent = recording ? 'REC' : (S.take?.name ?? '');
   el.btnRec.hidden = !S.mic;
   el.btnRec.classList.toggle('on', S.phase === 'rec');
@@ -971,7 +1018,7 @@ function updateCounter(): void {
 }
 
 function renderNow(): void {
-  const recording = S.phase === 'arming' || S.phase === 'count' || S.phase === 'rec';
+  const recording = isRecording();
   el.recBadge.hidden = S.phase !== 'rec';
   el.tuner.hidden = S.phase !== 'rec';
   el.meter.hidden = !recording;
@@ -1064,18 +1111,27 @@ function renderInspector(): void {
   el.flags.hidden = !idle || flagged.length === 0;
   el.allOk.hidden = !idle || flagged.length > 0 || S.notes.length === 0;
   el.flagCount.textContent = String(flagged.length);
-  el.flagList.innerHTML = '';
-  for (const n of flagged) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = `flag-row${n.id === S.selected ? ' sel' : ''}`;
-    b.dataset.focus = `flag-${n.id}`;
-    b.innerHTML = `<span class="pos"></span><span class="lab"></span><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>`;
+  // Rows are rebuilt only when the set of flagged notes changes (not on every knob tick).
+  const ids = flagged.map((n) => n.id).join(' ');
+  if (el.flagList.dataset.ids !== ids) {
+    el.flagList.dataset.ids = ids;
+    el.flagList.innerHTML = '';
+    for (const n of flagged) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'flag-row';
+      b.dataset.focus = `flag-${n.id}`;
+      b.dataset.id = n.id;
+      b.innerHTML = `<span class="pos"></span><span class="lab"></span><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></svg>`;
+      el.flagList.appendChild(b);
+    }
+  }
+  flagged.forEach((n, i) => {
+    const b = el.flagList.children[i] as HTMLElement;
+    b.classList.toggle('sel', n.id === S.selected);
     (b.querySelector('.pos') as HTMLElement).textContent = barBeat(n.startBeat);
     (b.querySelector('.lab') as HTMLElement).textContent = label(n.pitch);
-    b.addEventListener('click', () => select(n.id, true));
-    el.flagList.appendChild(b);
-  }
+  });
   if (focusKey && (focusKey.startsWith('cand-') || focusKey.startsWith('flag-'))) {
     const again =
       document.querySelector<HTMLElement>(`[data-focus="${focusKey}"]`) ??
@@ -1089,17 +1145,17 @@ function renderInspector(): void {
   renderSettings();
 }
 
-/** Visible pitch range of the current take. */
+/** Visible pitch range of the current take (its notes and its voice curve). */
 function currentRange(): [number, number] {
   const t = S.take;
   const pitches: number[] = S.notes.map((n) => n.pitch);
-  if (t) for (const p of t.trans.curve) pitches.push(p);
+  if (t && !Number.isNaN(t.curveRange[0])) pitches.push(...t.curveRange);
   return fitRange(pitches, roll.minRows);
 }
 
-/** Roll data that only changes with the notes, the take or the tempo (not every frame). */
+/** Roll data that only changes with the notes, the take, the tempo or the roll's height (not every frame). */
 let rollCache: {
-  version: number;
+  key: string;
   notes: RollNote[];
   curve: RollView['curve'];
   envelope: RollView['envelope'];
@@ -1107,8 +1163,21 @@ let rollCache: {
   range: [number, number];
 } | null = null;
 
+/** The voice curve's time axis in beats, per take and tempo. */
+let beatsCache: { take: Take; bpm: number; beats: Float32Array } | null = null;
+
+function curveBeats(t: Take): Float32Array {
+  if (beatsCache?.take !== t || beatsCache.bpm !== S.bpm) {
+    const beats = new Float32Array(t.trans.frameTimes.length);
+    for (let i = 0; i < beats.length; i++) beats[i] = toBeats(t.trans.frameTimes[i] - t.zero);
+    beatsCache = { take: t, bpm: S.bpm, beats };
+  }
+  return beatsCache.beats;
+}
+
 function rollData() {
-  if (rollCache?.version === S.version) return rollCache;
+  const key = `${S.version}:${roll.minRows}`;
+  if (rollCache?.key === key) return rollCache;
   const t = S.take;
   const notes: RollNote[] = S.notes.map((n) => ({
     id: n.id,
@@ -1122,15 +1191,13 @@ function rollData() {
   let envelope: RollView['envelope'] = null;
   let total = 16;
   if (t) {
-    const beats = new Float32Array(t.trans.frameTimes.length);
-    for (let i = 0; i < beats.length; i++) beats[i] = toBeats(t.trans.frameTimes[i] - t.zero);
-    curve = { beats, pitch: t.trans.curve };
-    envelope = { start: toBeats((t.frames[0]?.t ?? 0) - t.zero - HOP_SEC / 2), step: toBeats(HOP_SEC), peaks: t.peaks };
-    let endBeat = toBeats(t.audio.length / t.sampleRate - t.zero);
+    curve = { beats: curveBeats(t), pitch: t.trans.curve };
+    envelope = { start: toBeats((t.trans.frameTimes[0] ?? 0) - t.zero - HOP_SEC / 2), step: toBeats(HOP_SEC), peaks: t.peaks };
+    let endBeat = toBeats(t.buffer.duration - t.zero);
     for (const n of S.notes) endBeat = Math.max(endBeat, n.endBeat);
     total = Math.max(16, Math.ceil((endBeat + 1) / BEATS_PER_BAR) * BEATS_PER_BAR);
   }
-  rollCache = { version: S.version, notes, curve, envelope, total, range: currentRange() };
+  rollCache = { key, notes, curve, envelope, total, range: currentRange() };
   return rollCache;
 }
 
@@ -1230,7 +1297,8 @@ function deleteSelected(): void {
 
 /** Move the playback cursor (and restart playback there if it was playing). */
 function seek(beat: number): void {
-  const wasPlaying = !!player?.playing;
+  // Playback of the song continues from the new position; a 原音 clip just stops.
+  const wasPlaying = playing === 'song';
   stopPlayback();
   S.cursorBeat = Math.max(0, beat);
   if (wasPlaying) play();
@@ -1315,11 +1383,11 @@ function renderMeasure(): void {
     rows.push(['有声', `${Math.round(t.trans.voicedRatio * 100)} %`]);
     rows.push(['チューニング', `${t.trans.tuningCents > 0 ? '+' : ''}${t.trans.tuningCents} ¢`]);
     rows.push(['ノート', `${S.notes.length}（確認 ${S.notes.filter((n) => n.flagged).length}）`]);
-    rows.push(['音声', `${(t.sampleRate / 1000).toFixed(1)} kHz · ${(t.audio.length / t.sampleRate).toFixed(1)} s`]);
+    rows.push(['音声', `${(t.sampleRate / 1000).toFixed(1)} kHz · ${t.buffer.duration.toFixed(1)} s`]);
   }
   if (S.lastInput) {
     rows.push(['入力', S.lastInput.kind]);
-    rows.push(['遅れ', `${S.lastInput.latencyMs} ms`]);
+    rows.push(['遅れ', `${S.lastInput.deviceLatencyMs + P.latencyMs} ms`]);
   }
   el.measure.innerHTML = '';
   for (const [k, v] of rows) {
@@ -1344,16 +1412,11 @@ function renderExport(zipOnly: boolean): void {
   el.exportNote.textContent = zipOnly ? 'ZIP にまとめて保存。展開して DAW へ' : '';
 }
 
-/** In the claude.ai viewer files are saved through the host, which accepts .zip but not .mid or .wav. */
-async function saveVia(): Promise<DownloadsApi | null> {
-  return inArtifact ? downloadsApi : null;
-}
-
-async function openExport(): Promise<void> {
+function openExport(): void {
   if (!S.take || S.phase !== 'idle') return;
   stopPlayback();
   el.exportName.value = S.take.source === 'sample' ? 'musictool-sample' : S.take.name;
-  renderExport(!!(await saveVia()));
+  renderExport(savesThroughHost);
   showSheet(el.exportSheet);
 }
 
@@ -1365,7 +1428,8 @@ async function doExport(): Promise<void> {
     return;
   }
   const name = safeName(el.exportName.value || t.name);
-  const startSample = Math.min(t.audio.length, Math.round(t.zero * t.sampleRate));
+  const voice = samples(t);
+  const startSample = Math.min(voice.length, Math.round(t.zero * t.sampleRate));
   const files = buildFiles(S.exportKind, {
     name,
     bpm: S.bpm,
@@ -1373,16 +1437,21 @@ async function doExport(): Promise<void> {
     key: S.key,
     program: INSTRUMENTS.find((i) => i.id === P.instrument)?.program ?? 0,
     notes: S.notes,
-    voice: t.audio.subarray(startSample),
+    voice: voice.subarray(startSample),
     sampleRate: t.sampleRate,
   });
-  const dl = await saveVia();
-  const out = packageFiles(files, name, !!dl);
+  const out = packageFiles(files, name, savesThroughHost);
   lastExport = { filename: out.name, files: files.map((f) => ({ name: f.name, size: f.data.length })) };
-  if (!dl) {
+  if (!savesThroughHost) {
     saveWithLink(out);
     closeSheet();
     toast(`${out.name} を書き出しました`, 'ok');
+    return;
+  }
+  // The viewer's frame cannot download by itself: without the host's save, there is no way to save here.
+  const dl = await downloadsApi;
+  if (!dl) {
+    toast('この画面では保存できません', 'warn');
     return;
   }
   try {
@@ -1411,18 +1480,21 @@ el.btnStart.addEventListener('click', () => {
 el.btnMetro.addEventListener('click', () => {
   P.metronome = !P.metronome;
   savePrefs();
-  // Turned off while recording: silence the clicks already scheduled after the count-in.
-  if (rec && !P.metronome) {
+  if (rec) {
     const r = rec;
-    for (const c of r.clicks) {
-      if (c.time < r.zeroTime) continue;
-      try {
-        c.osc.stop();
-      } catch {
-        /* already stopped */
+    const now = audio().currentTime;
+    if (!P.metronome) {
+      // Silence the clicks already scheduled (the count-in keeps its clicks).
+      cancelClicks(r, Math.max(now, r.zeroTime));
+    } else {
+      // Clicks resume from the next beat instead of after the beats already passed by the scheduler.
+      const nextBeat = Math.max(r.countBeats, Math.ceil((now - r.t0) / r.spb));
+      if (nextBeat < r.nextBeat) {
+        cancelClicks(r, Math.max(now, r.zeroTime));
+        r.nextBeat = nextBeat;
       }
+      scheduleClicks(r);
     }
-    r.clicks = r.clicks.filter((c) => c.time < r.zeroTime);
   }
   renderTransport();
 });
@@ -1465,12 +1537,12 @@ el.btnSettings.addEventListener('click', () => {
   renderSettings();
 });
 el.btnUndo.addEventListener('click', undo);
-el.btnExport.addEventListener('click', () => void openExport());
+el.btnExport.addEventListener('click', openExport);
 el.btnDownload.addEventListener('click', () => void doExport());
 for (const tile of el.exportSheet.querySelectorAll<HTMLButtonElement>('.tile')) {
-  tile.addEventListener('click', async () => {
+  tile.addEventListener('click', () => {
     S.exportKind = tile.dataset.kind as ExportKind;
-    renderExport(!!(await saveVia()));
+    renderExport(savesThroughHost);
   });
 }
 el.backdrop.addEventListener('click', closeSheet);
@@ -1516,7 +1588,13 @@ el.balance.addEventListener('input', () => {
 });
 releaseFocusAfterPointer(el.balance);
 el.btnListen.addEventListener('click', listenSelected);
+el.flagList.addEventListener('click', (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>('.flag-row');
+  if (row?.dataset.id) select(row.dataset.id, true);
+});
 el.btnDelete.addEventListener('click', deleteSelected);
+
+roll.onResize = drawRoll;
 
 roll.onPick = (id, beat) => {
   if (S.phase !== 'idle') return;
@@ -1568,6 +1646,10 @@ document.addEventListener('keyup', (e) => {
 document.addEventListener('keydown', (e) => {
   const target = e.target as HTMLElement;
   if (e.isComposing || e.keyCode === 229) return;
+  if (e.repeat && !e.key.startsWith('Arrow')) {
+    if (e.key === ' ' && !isTextField(target)) e.preventDefault();
+    return;
+  }
   if (e.key === 'Escape') {
     if (openSheet) closeSheet();
     else if (S.selected) select(null);
@@ -1585,7 +1667,7 @@ document.addEventListener('keydown', (e) => {
     undo();
   } else if (mod && e.key.toLowerCase() === 'e') {
     e.preventDefault();
-    void openExport();
+    openExport();
   } else if (mod) {
     return;
   } else if (e.key === ' ') {
@@ -1650,7 +1732,7 @@ function trapFocus(e: KeyboardEvent, root: HTMLElement): void {
       name: S.take.name,
       source: S.take.source,
       sampleRate: S.take.sampleRate,
-      seconds: S.take.audio.length / S.take.sampleRate,
+      seconds: S.take.buffer.duration,
       zero: S.take.zero,
       tuningCents: S.take.trans.tuningCents,
       millisPerFrame: S.take.stats.millisPerFrame,

@@ -64,16 +64,26 @@ export function arrange(notes: RawNote[], o: ArrangeOptions): ArrangedNote[] {
       };
     })
     .sort((a, b) => a.startBeat - b.startBeat || a.raw.start - b.raw.start);
-  // Monophonic line: no two notes start together and no note overlaps the next.
+  // Monophonic line: no two notes start together and no note overlaps the next. When quantizing pulls two
+  // notes onto one slot, the note sung closer to the slot keeps it and the other goes back to where it was
+  // sung (a grace note before the beat stays before it; the note sung on the beat stays on it).
+  const sung = (n: ArrangedNote) => secondsToBeats(n.raw.start, o.bpm);
   for (let i = 1; i < out.length; i++) {
     const prev = out[i - 1];
     const cur = out[i];
-    if (cur.startBeat < prev.startBeat + MIN_BEATS) {
-      // Quantizing pulled two notes onto one slot: keep this one where it was sung (or just after the other).
-      const len = cur.endBeat - cur.startBeat;
-      cur.startBeat = Math.max(prev.startBeat + MIN_BEATS, secondsToBeats(cur.raw.start, o.bpm));
-      cur.endBeat = Math.max(cur.endBeat, cur.startBeat + Math.max(MIN_BEATS, Math.min(len, o.grid)));
+    if (cur.startBeat >= prev.startBeat + MIN_BEATS) continue;
+    const slot = prev.startBeat;
+    if (Math.abs(sung(cur) - slot) < Math.abs(sung(prev) - slot)) {
+      const lowest = i >= 2 ? out[i - 2].startBeat + MIN_BEATS : 0;
+      const back = Math.min(cur.startBeat - MIN_BEATS, Math.max(lowest, sung(prev)));
+      if (back >= lowest) {
+        prev.startBeat = back;
+        continue;
+      }
     }
+    const len = cur.endBeat - cur.startBeat;
+    cur.startBeat = Math.max(prev.startBeat + MIN_BEATS, sung(cur));
+    cur.endBeat = Math.max(cur.endBeat, cur.startBeat + Math.max(MIN_BEATS, Math.min(len, o.grid)));
   }
   for (let i = 0; i < out.length - 1; i++) {
     if (out[i].endBeat > out[i + 1].startBeat) out[i].endBeat = out[i + 1].startBeat;

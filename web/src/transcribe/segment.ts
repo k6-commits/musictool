@@ -134,17 +134,20 @@ export function transcribe(frames: PitchFrame[], params: SegmentParams): Transcr
 }
 
 /**
- * Level gate and reference level from the take itself (capture has no automatic gain, so absolute
- * levels depend on the mic). The gate sits 12 dB over the quietest frames, but never closer than 20 dB
- * to the loud level: in a take sung without pauses the quietest frames are the voice itself.
+ * Level gate and reference level from the take itself (capture has no automatic gain, so absolute levels
+ * depend on the mic). The loud reference is the top 2 % of frames, which is the voice even when singing
+ * fills only a few percent of a long take. With real pauses in the take, the gate sits 12 dB over the
+ * quietest tenth (the room, hum or bleed) but always lets the voice through; in a take sung without
+ * pauses the quietest frames are the voice itself, so the gate goes well below the voice instead.
  */
 export function levels(db: Float32Array): { gate: number; loudDb: number } {
   const n = db.length;
   if (!n) return { gate: -75, loudDb: -20 };
   const sorted = Float32Array.from(db).sort();
   const floor = sorted[Math.floor(n * 0.1)];
-  const loudDb = sorted[Math.min(n - 1, Math.floor(n * 0.95))];
-  return { gate: Math.max(-75, Math.min(floor + 12, loudDb - 20)), loudDb };
+  const loudDb = sorted[Math.min(n - 1, Math.floor(n * 0.98))];
+  const gate = loudDb - floor >= 18 ? Math.min(floor + 12, loudDb - 12) : loudDb - 26;
+  return { gate: Math.max(-80, gate), loudDb };
 }
 
 /** A note may begin with a glide (scoop or fall) into its pitch for up to this many frames (~220 ms). */
@@ -166,8 +169,9 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
     let glided = false;
     let vals: number[] = [pc[i]];
     let lastVoiced = i;
-    // Re-articulation of the same pitch: the level dips well below its peak, then rises again.
-    // The attack ramp never triggers this because the level only grows there.
+    // Re-articulation of the same pitch: the level falls below half of its peak (6 dB), then rises again.
+    // The attack ramp never triggers this because the level only grows there. Shallower dips are left alone:
+    // by level alone they look like one cycle of tremolo (amplitude vibrato), which must not split a note.
     let peak = frames[i].rms;
     let trough = peak;
     let troughAt = i;
@@ -210,7 +214,7 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
       }
       deviating = 0;
       const level = frames[j].rms;
-      if (trough < peak * 0.6 && level > trough * 1.7 && level > peak * 0.5 && troughAt > s + 2) {
+      if (trough < peak * 0.5 && level > trough * 2 && level > peak * 0.4 && troughAt > s + 2) {
         lastVoiced = troughAt;
         next = troughAt + 1;
         nextOnset = true;
@@ -227,7 +231,12 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
       vals.push(pc[j]);
       lastVoiced = j;
     }
-    segments.push({ s, e: lastVoiced, settle: Math.min(settle, lastVoiced), onset: onsetFlag || glided });
+    // The segment ended (dip or silence) before the glide settled: it was not a glide into this note.
+    if (settle > lastVoiced) {
+      settle = s;
+      glided = false;
+    }
+    segments.push({ s, e: lastVoiced, settle, onset: onsetFlag || glided });
     if (next >= 0) {
       i = next;
       onsetFlag = nextOnset;
@@ -240,7 +249,12 @@ function segmentFrames(pc: Float64Array, frames: PitchFrame[], loud: Uint8Array,
   return segments;
 }
 
-/** Frames [from, to) move steadily in direction `dir` (a scoop up into a note, or a fall down into it). */
+/**
+ * Frames [from, to) are a glide into a note: a scoop up into it (or a fall down into it) that keeps moving.
+ * A short real note that leads into the next one differs in that its pitch settles somewhere, if only for
+ * two frames, even when it began with a scoop of its own. (The first step is not judged: the window of the
+ * first frame after an onset only partly covers the new sound.)
+ */
 function isGlide(pc: Float64Array, from: number, to: number, dir: number): boolean {
   let prev = NaN;
   let firstVal = NaN;
@@ -251,8 +265,10 @@ function isGlide(pc: Float64Array, from: number, to: number, dir: number): boole
     if (Number.isNaN(v)) continue;
     if (Number.isNaN(firstVal)) firstVal = v;
     else {
+      const step = v - prev;
+      if (steps > 0 && Math.abs(step) <= 0.05) return false; // settled: a note, not a glide
       steps++;
-      if ((v - prev) * dir > 0.005) moving++;
+      if (step * dir > 0) moving++;
     }
     prev = v;
   }
@@ -363,9 +379,10 @@ function median(values: number[]): number {
 
 const scratch = new Float64Array(32);
 
-/** Median of the last `count` values (count <= 32) without allocating: insertion sort into a scratch buffer. */
+/** Median of the last `count` values without allocating (insertion sort into a scratch buffer) for up to 32 values. */
 function medianOfLast(values: number[], count: number): number {
   const n = Math.min(count, values.length);
+  if (n > scratch.length) return median(values.slice(values.length - n));
   const off = values.length - n;
   for (let i = 0; i < n; i++) {
     const v = values[off + i];

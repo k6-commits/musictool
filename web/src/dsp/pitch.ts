@@ -1,6 +1,5 @@
-// Pitch tracking at 16 kHz with a 16 ms hop, offline and streaming.
-// Both paths produce the same frames: the streaming tracker drops the resampler's filter delay and,
-// when the take ends, flushes and zero-pads exactly like the offline analysis.
+// Pitch tracking at 16 kHz with a 16 ms hop. One streaming tracker serves both the live view and
+// whole-take analysis, so a recorded take and the same audio opened as a file give the same frames.
 import { Resampler } from './resample';
 import { Yin } from './yin';
 
@@ -25,7 +24,7 @@ export interface PitchFrame {
 }
 
 export interface AnalyzeStats {
-  /** Pitch-detection time per 16 ms frame. */
+  /** Processing time (resampling and pitch detection) per 16 ms frame. */
   millisPerFrame: number;
 }
 
@@ -33,19 +32,9 @@ export function makeYin(mode: InputMode): Yin {
   return new Yin({ sampleRate: ANALYSIS_RATE, ...YIN_SETTINGS[mode] });
 }
 
-/** Number of 16 kHz samples a take of `inputLength` samples at `rate` is analyzed over. */
-function analysisLength(inputLength: number, rate: number): number {
-  return rate === ANALYSIS_RATE ? inputLength : Math.floor(inputLength / (rate / ANALYSIS_RATE));
-}
-
-/** Resampler flush length: enough input zeros to push the filter's tail out. */
-function flushLength(r: Resampler): number {
-  return Math.ceil(r.ratio * (r.delay + 2)) + 64;
-}
-
 /**
- * Offline analysis of a whole take. Resamples in chunks and yields to the event loop every ~30 ms,
- * so the page stays responsive and the progress bar moves even for long files.
+ * Offline analysis of a whole take: the streaming tracker fed in chunks, yielding to the event loop every
+ * ~30 ms so the page stays responsive and the progress bar moves even for long files.
  */
 export async function analyzePitch(
   samples: Float32Array,
@@ -53,107 +42,73 @@ export async function analyzePitch(
   mode: InputMode,
   onProgress?: (fraction: number) => void,
 ): Promise<{ frames: PitchFrame[]; stats: AnalyzeStats }> {
-  const yin = makeYin(mode);
-  const want = analysisLength(samples.length, sampleRate);
-  // The analysis signal, followed by zeros so the last frames have a full window.
-  const x16 = new Float32Array(want + yin.frameLength);
+  const live = new LivePitch(sampleRate, mode);
   const frames: PitchFrame[] = [];
-  let filled = 0;
-  let next = 0;
-  let detectMs = 0;
+  const CHUNK = 8192;
   let lastYield = now();
-
-  const maybeYield = async (fraction: number) => {
-    if (now() - lastYield < 30) return;
-    onProgress?.(fraction);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    lastYield = now();
-  };
-  const analyzeAvailable = async () => {
-    while (next < want && (next + yin.frameLength <= filled || filled >= want)) {
-      const t0 = now();
-      const r = yin.detect(x16, next);
-      detectMs += now() - t0;
-      frames.push({ t: (next + yin.window / 2) / ANALYSIS_RATE, f0: r.f0, conf: r.conf, rms: r.rms });
-      next += HOP;
-      if ((next / HOP) % 64 === 0) await maybeYield(next / Math.max(1, want));
+  for (let p = 0; p < samples.length; p += CHUNK) {
+    for (const f of live.push(samples.subarray(p, Math.min(samples.length, p + CHUNK)))) frames.push(f);
+    if (now() - lastYield > 30) {
+      onProgress?.(p / samples.length);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      lastYield = now();
     }
-  };
-
-  if (sampleRate === ANALYSIS_RATE) {
-    x16.set(samples);
-    filled = want;
-  } else {
-    const r = new Resampler(sampleRate, ANALYSIS_RATE);
-    const skip = Math.round(r.delay);
-    let produced = 0;
-    const write = (out: Float32Array) => {
-      for (let i = 0; i < out.length; i++) {
-        const g = produced + i - skip;
-        if (g >= 0 && g < want) x16[g] = out[i];
-      }
-      produced += out.length;
-      filled = Math.min(want, Math.max(0, produced - skip));
-    };
-    const CHUNK = 16384;
-    for (let p = 0; p < samples.length; p += CHUNK) {
-      write(r.process(samples.subarray(p, Math.min(samples.length, p + CHUNK))));
-      await analyzeAvailable();
-      await maybeYield(next / Math.max(1, want));
-    }
-    write(r.process(new Float32Array(flushLength(r))));
-    filled = want;
   }
-  await analyzeAvailable();
+  for (const f of live.finish()) frames.push(f);
   onProgress?.(1);
-  return { frames, stats: { millisPerFrame: detectMs / Math.max(1, frames.length) } };
+  return { frames, stats: { millisPerFrame: live.millisPerFrame } };
 }
 
-/** Streaming tracker for live display while singing; `finish()` completes the take's frames. */
+/**
+ * Streaming tracker: used live while singing, and by analyzePitch for whole takes. It drops the resampler's
+ * filter delay and, when the take ends (`finish()`), flushes and zero-pads, so every frame lines up with the
+ * input. `millisPerFrame` is the processing time (resampling and pitch detection) per 16 ms frame.
+ */
 export class LivePitch {
   private readonly resampler: Resampler;
   private readonly yin: Yin;
-  private readonly skip: number;
   private skipped = 0;
   private buffer = new Float32Array(0);
   private read = 0;
   private produced = 0;
   private written = 0;
   private inputSamples = 0;
-  private detectMs = 0;
+  private busyMs = 0;
 
-  constructor(
-    private readonly inputRate: number,
-    mode: InputMode,
-  ) {
+  constructor(inputRate: number, mode: InputMode) {
     this.resampler = new Resampler(inputRate, ANALYSIS_RATE);
     this.yin = makeYin(mode);
-    this.skip = Math.round(this.resampler.delay);
   }
 
   get millisPerFrame(): number {
-    return this.detectMs / Math.max(1, this.produced);
+    return this.busyMs / Math.max(1, this.produced);
   }
 
   push(chunk: Float32Array): PitchFrame[] {
+    const t0 = now();
     this.inputSamples += chunk.length;
     this.append(this.resampler.process(chunk), Infinity);
-    return this.run(Infinity);
+    const out = this.run(Infinity);
+    this.busyMs += now() - t0;
+    return out;
   }
 
   /** The take is over: flush the resampler, pad with zeros and return the remaining frames. */
   finish(): PitchFrame[] {
-    const want = analysisLength(this.inputSamples, this.inputRate);
-    this.append(this.resampler.process(new Float32Array(flushLength(this.resampler))), want);
+    const t0 = now();
+    const want = this.resampler.outputLength(this.inputSamples);
+    this.append(this.resampler.process(new Float32Array(this.resampler.flushLength)), want);
     if (this.written < want) this.append(new Float32Array(want - this.written), want);
     this.append(new Float32Array(this.yin.frameLength), Infinity, true);
-    return this.run(Math.ceil(want / HOP));
+    const out = this.run(Math.ceil(want / HOP));
+    this.busyMs += now() - t0;
+    return out;
   }
 
   private append(y: Float32Array, limit: number, padding = false): void {
     let from = 0;
-    if (!padding && this.skipped < this.skip) {
-      from = Math.min(this.skip - this.skipped, y.length);
+    if (!padding && this.skipped < this.resampler.skip) {
+      from = Math.min(this.resampler.skip - this.skipped, y.length);
       this.skipped += from;
     }
     const to = padding ? y.length : Math.min(y.length, from + Math.max(0, limit - this.written));
@@ -172,9 +127,7 @@ export class LivePitch {
     const out: PitchFrame[] = [];
     const len = this.yin.frameLength;
     while (this.produced < maxFrames && this.read + len <= this.buffer.length) {
-      const t0 = now();
       const r = this.yin.detect(this.buffer, this.read);
-      this.detectMs += now() - t0;
       out.push({ t: (this.produced * HOP + this.yin.window / 2) / ANALYSIS_RATE, f0: r.f0, conf: r.conf, rms: r.rms });
       this.read += HOP;
       this.produced++;

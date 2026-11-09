@@ -41,6 +41,21 @@ export class Resampler {
     return this.taps ? (this.taps.length - 1) / 2 / this.ratio : 0;
   }
 
+  /** Output samples to drop at the start so the output lines up with the input. */
+  get skip(): number {
+    return Math.round(this.delay);
+  }
+
+  /** Length of the aligned output for `inputLength` input samples. */
+  outputLength(inputLength: number): number {
+    return this.fromRate === this.toRate ? inputLength : Math.floor(inputLength / this.ratio);
+  }
+
+  /** Zeros to push through at the end so the filter's tail comes out. */
+  get flushLength(): number {
+    return Math.ceil(this.ratio * (this.delay + 2)) + 64;
+  }
+
   process(input: Float32Array): Float32Array {
     // Virtual buffer: the filtered samples carried over from the last call, then this call's filtered input.
     // Filtered samples are computed only where the interpolator reads them (every third one at 48 kHz).
@@ -92,11 +107,9 @@ export function resample(input: Float32Array, fromRate: number, toRate: number):
   if (fromRate === toRate) return input.slice();
   const r = new Resampler(fromRate, toRate);
   const head = r.process(input);
-  const tail = r.process(new Float32Array(Math.ceil(r.ratio * (r.delay + 2)) + 64));
+  const tail = r.process(new Float32Array(r.flushLength));
   const all = new Float32Array(head.length + tail.length);
   all.set(head);
   all.set(tail, head.length);
-  const skip = Math.round(r.delay);
-  const want = Math.floor(input.length / r.ratio);
-  return all.slice(skip, skip + want);
+  return all.slice(r.skip, r.skip + r.outputLength(input.length));
 }

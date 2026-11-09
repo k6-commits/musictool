@@ -16,10 +16,20 @@ export const MIC_MELODY: [number, number, number][] = [
   [60, 6, 1.8],
 ];
 
+function micVoice(sampleRate: number, leadSeconds: number): Float32Array {
+  const notes = fromBeats(MIC_BPM, MIC_MELODY).map((n) => ({ ...n, start: n.start + leadSeconds }));
+  return sing(notes, { sampleRate, detuneCents: -18, noiseDb: -40 });
+}
+
 /** The melody after `leadSeconds` of silence (time for the count-in). */
 export function micWav(sampleRate: number, leadSeconds: number): Uint8Array {
-  const notes = fromBeats(MIC_BPM, MIC_MELODY).map((n) => ({ ...n, start: n.start + leadSeconds }));
-  return encodeWav(sing(notes, { sampleRate, detuneCents: -18, noiseDb: -40 }), sampleRate);
+  return encodeWav(micVoice(sampleRate, leadSeconds), sampleRate);
+}
+
+/** The same take on the right channel only (as from input 2 of a stereo interface). */
+export function micWavRightOnly(sampleRate: number, leadSeconds: number): Uint8Array {
+  const voice = micVoice(sampleRate, leadSeconds);
+  return encodeWav([new Float32Array(voice.length), voice], sampleRate);
 }
 
 export const FILE_BPM = 112;
@@ -46,35 +56,6 @@ export function longWav(sampleRate: number, seconds: number): Uint8Array {
   const notes = [];
   for (let t = 0.3, i = 0; t < seconds - 1; t += 0.5, i++) notes.push({ pitch: 55 + ((i * 5) % 12), start: t, dur: 0.42 });
   return encodeWav(sing(notes, { sampleRate, noiseDb: -40, length: seconds }), sampleRate);
-}
-
-/** The mic melody on the right channel only (as from input 2 of a stereo interface), 16-bit stereo WAV. */
-export function micWavRightOnly(sampleRate: number, leadSeconds: number): Uint8Array {
-  const notes = fromBeats(MIC_BPM, MIC_MELODY).map((n) => ({ ...n, start: n.start + leadSeconds }));
-  const mono = sing(notes, { sampleRate, detuneCents: -18, noiseDb: -40 });
-  const n = mono.length;
-  const buf = new ArrayBuffer(44 + n * 4);
-  const v = new DataView(buf);
-  const ascii = (o: number, s: string) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
-  ascii(0, 'RIFF');
-  v.setUint32(4, 36 + n * 4, true);
-  ascii(8, 'WAVE');
-  ascii(12, 'fmt ');
-  v.setUint32(16, 16, true);
-  v.setUint16(20, 1, true);
-  v.setUint16(22, 2, true);
-  v.setUint32(24, sampleRate, true);
-  v.setUint32(28, sampleRate * 4, true);
-  v.setUint16(32, 4, true);
-  v.setUint16(34, 16, true);
-  ascii(36, 'data');
-  v.setUint32(40, n * 4, true);
-  for (let i = 0; i < n; i++) {
-    const s = Math.max(-1, Math.min(1, mono[i]));
-    v.setInt16(44 + i * 4, 0, true);
-    v.setInt16(44 + i * 4 + 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-  }
-  return new Uint8Array(buf);
 }
 
 export { noteName } from '../src/music/notes';

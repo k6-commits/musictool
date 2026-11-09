@@ -26,6 +26,10 @@ export interface SingOptions {
   scoopSec?: number;
   /** Overall level, applied before the noise (1 = about -14 dBFS RMS). */
   gain?: number;
+  /** Notes that touch (one ends where the next starts) are slurred without a break in level; a repeated pitch is still re-articulated. */
+  legato?: boolean;
+  /** Amplitude vibrato depth in dB (±), at 5.5 Hz. */
+  tremoloDb?: number;
   seed?: number;
 }
 
@@ -63,9 +67,14 @@ export function sing(notes: SungNote[], o: SingOptions): Float32Array {
     if (note.dur > 0.5 && k > 0.2) cents += vib * Math.sin(2 * Math.PI * 5.5 * (k - 0.2));
     const f0 = midiToHz(note.pitch + cents / 100);
     phase += (2 * Math.PI * f0) / sr;
-    const attack = Math.min(1, k / 0.04);
-    const release = Math.min(1, (note.dur - k) / 0.05);
-    const env = Math.max(0, Math.min(attack, release));
+    const prev = sorted[idx - 1];
+    const next = sorted[idx + 1];
+    const joinedBefore = o.legato && prev && prev.pitch !== note.pitch && Math.abs(prev.start + prev.dur - note.start) < 0.005;
+    const joinedAfter = o.legato && next && next.pitch !== note.pitch && Math.abs(note.start + note.dur - next.start) < 0.005;
+    const attack = joinedBefore ? 1 : Math.min(1, k / 0.04);
+    const release = joinedAfter ? 1 : Math.min(1, (note.dur - k) / 0.05);
+    let env = Math.max(0, Math.min(attack, release));
+    if (o.tremoloDb) env *= Math.pow(10, (o.tremoloDb / 20) * Math.sin(2 * Math.PI * 5.5 * t));
     let s = 0;
     for (let h = 1; h <= 8; h++) {
       const fh = f0 * h;

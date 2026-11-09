@@ -76,6 +76,8 @@ export class PianoRoll {
   private height = 400;
   private dpr = 1;
   onPick: ((id: string | null, beat: number) => void) | null = null;
+  /** Called after the roll changed size (the number of rows it wants may have changed). */
+  onResize: (() => void) | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -83,7 +85,11 @@ export class PianoRoll {
     this.roll = root.querySelector('canvas.roll') as HTMLCanvasElement;
     this.scroller = root.querySelector('.scroller') as HTMLElement;
     this.spacer = root.querySelector('.spacer') as HTMLElement;
-    new ResizeObserver(() => this.layout()).observe(root);
+    new ResizeObserver(() => {
+      const rows = this.minRows;
+      this.layout();
+      if (this.minRows !== rows) this.onResize?.();
+    }).observe(root);
     this.watchPixelRatio();
     this.scroller.addEventListener('scroll', () => this.draw());
     // `click` fires for a tap or a mouse click, but not at the start of a swipe that scrolls the roll.
@@ -97,7 +103,7 @@ export class PianoRoll {
 
   /** Rows the roll wants to show at least, given its height (fewer on short screens so rows stay readable). */
   get minRows(): number {
-    const usable = (this.root.clientHeight || 400) - RULER_H - LANE_H;
+    const usable = this.height - RULER_H - LANE_H;
     return Math.max(12, Math.min(18, Math.floor(usable / 20)));
   }
 

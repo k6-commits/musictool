@@ -83,10 +83,11 @@ const trackMic = () => {
 };
 const liveTracks = (page) => page.evaluate(() => window.__tracks.filter((t) => t.readyState === 'live').length);
 
-async function newApp(browser, options = {}) {
+async function newApp(browser, options = {}, initScript = null) {
   const context = await browser.newContext({ viewport: { width: 1360, height: 860 }, deviceScaleFactor: 1, acceptDownloads: true, ...options });
   await context.grantPermissions(['microphone'], { origin: url });
   await context.addInitScript(trackMic);
+  if (initScript) await context.addInitScript(initScript);
   const page = await context.newPage();
   page.errors = [];
   page.on('pageerror', (e) => page.errors.push(e.message));
@@ -253,17 +254,17 @@ try {
   // ---- 原音 plays the voice under the selected note (the file starts with 0.73 s of silence)
   const listenAt = async (i) => {
     await page.evaluate((k) => window.__mt.select(k), i);
+    const note = await page.textContent('#now-sub'); // the app's bar.beat of the selected note
     await page.click('#btn-listen');
     await page.waitForTimeout(120);
     const at = await counter(page);
     await page.waitForFunction(() => !document.querySelector('#btn-play').classList.contains('on'), null, { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(300);
-    return { at, after: await counter(page) };
+    return { note, at, after: await counter(page) };
   };
-  const bb = (beat) => `${Math.floor(beat / 4) + 1}.${Math.floor(beat % 4) + 1}`;
   const first = await listenAt(0);
   const fifth = await listenAt(4);
-  check('原音 plays from the selected note', first.at === bb(fileNotes[0].startBeat) && fifth.at === bb(fileNotes[4].startBeat), `first ${first.at}, fifth ${fifth.at} (note at ${bb(fileNotes[4].startBeat)})`);
+  check('原音 plays from the selected note', first.at === first.note && fifth.at === fifth.note, `first ${first.at} (note at ${first.note}), fifth ${fifth.at} (note at ${fifth.note})`);
   check('the playhead returns after 原音', first.after === '1.1' && fifth.after === '1.1', `${first.after} / ${fifth.after}`);
   await page.keyboard.press('Escape');
 
@@ -372,24 +373,18 @@ try {
   await phone.context.close();
 
   // ---- AudioWorklet unavailable: the ScriptProcessor fallback keeps the timeline
-  const fallbackContext = await browser.newContext({ viewport: { width: 1360, height: 860 } });
-  await fallbackContext.grantPermissions(['microphone'], { origin: url });
-  await fallbackContext.addInitScript(() => {
+  const fallback = await newApp(browser, {}, () => {
     AudioWorklet.prototype.addModule = () => Promise.reject(new Error('blocked for the test'));
   });
-  const fb = await fallbackContext.newPage();
-  const fbErrors = [];
-  fb.on('pageerror', (e) => fbErrors.push(e.message));
-  await fb.goto(url);
-  await fb.waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle');
-  await fb.fill('#bpm', '100');
-  await fb.press('#bpm', 'Enter');
-  await recordTake(fb, 5700);
-  const fbNotes = await fb.evaluate(() => window.__mt.notes());
+  await fallback.page.fill('#bpm', '100');
+  await fallback.page.press('#bpm', 'Enter');
+  await recordTake(fallback.page, 5700);
+  const fbNotes = await fallback.page.evaluate(() => window.__mt.notes());
   const lastStart = fbNotes[fbNotes.length - 1]?.startBeat ?? -1;
   check('ScriptProcessor fallback: notes match and stay on the grid', fbNotes.map((n) => n.name).join(' ') === expectNames(MIC_MELODY) && Math.abs(lastStart - 6) < 0.35, `${fbNotes.map((n) => n.name).join(' ')}; last note at beat ${lastStart.toFixed(2)}`);
-  check('no page errors (fallback)', fbErrors.length === 0, fbErrors.join(' | '));
-  await fallbackContext.close();
+  check('ScriptProcessor fallback: the microphone is released', (await liveTracks(fallback.page)) === 0);
+  check('no page errors (fallback)', fallback.page.errors.length === 0, fallback.page.errors.join(' | '));
+  await fallback.context.close();
 
   // ---- claude.ai artifact mode: no microphone, files are saved through the viewer as .zip
   const art = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });

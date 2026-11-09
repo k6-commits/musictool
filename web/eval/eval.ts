@@ -15,8 +15,10 @@ interface Case {
   scoop?: [cents: number, seconds: number];
   /** Overall level (1 = about -14 dBFS RMS). */
   gain?: number;
-  /** Notes back to back with no lead-in silence. */
+  /** Notes back to back, sung without breaks, and no lead-in silence. */
   legato?: boolean;
+  /** Amplitude vibrato in dB (±). */
+  tremoloDb?: number;
   mode?: InputMode;
 }
 
@@ -46,6 +48,8 @@ const CASES: Case[] = [
   { name: 'deep scoops (150 c / 100 ms)', base: 57, bpm: 96, scoop: [150, 0.1], noiseDb: -40 },
   { name: 'deeper scoops (200 c / 150 ms)', base: 57, bpm: 96, scoop: [200, 0.15], noiseDb: -40 },
   { name: 'quiet, no pauses (-40 dBFS)', base: 57, bpm: 96, gain: 0.05, legato: true },
+  { name: 'legato, no breaks (150 BPM)', base: 57, bpm: 150, legato: true, noiseDb: -40 },
+  { name: 'tremolo ±2.5 dB', base: 57, bpm: 96, tremoloDb: 2.5, noiseDb: -40 },
   { name: 'humming', base: 52, bpm: 90, noiseDb: -35, mode: 'hum' },
   { name: 'whistling', base: 79, bpm: 110, vibrato: 10, noiseDb: -40, mode: 'whistle' },
 ];
@@ -62,6 +66,8 @@ for (const c of CASES) {
     scoopCents: c.scoop?.[0],
     scoopSec: c.scoop?.[1],
     gain: c.gain,
+    legato: c.legato,
+    tremoloDb: c.tremoloDb,
     seed: 11,
   });
   const mode = c.mode ?? 'sing';

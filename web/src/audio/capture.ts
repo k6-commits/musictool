@@ -10,8 +10,14 @@ class MtTap extends AudioWorkletProcessor {
     this.buf = new Float32Array(2048);
     this.n = 0;
     this.start = 0;
+    this.done = false;
+    this.port.onmessage = (e) => {
+      if (e.data === 'stop') this.done = true;
+    };
   }
   process(inputs) {
+    // Returning false lets the browser retire this processor once the node is disconnected.
+    if (this.done) return false;
     const input = inputs[0];
     if (input && input.length) {
       const len = input[0].length;
@@ -56,6 +62,7 @@ export class MicCapture {
     private readonly stream: MediaStream,
     private readonly nodes: AudioNode[],
     kind: 'worklet' | 'script-processor',
+    private readonly release: () => void,
   ) {
     this.sampleRate = ctx.sampleRate;
     this.kind = kind;
@@ -99,7 +106,11 @@ export class MicCapture {
       const node = new AudioWorkletNode(ctx, 'mt-tap', { numberOfInputs: 1, numberOfOutputs: 1 });
       source.connect(node);
       node.connect(mute);
-      capture = new MicCapture(ctx, stream, [source, node, mute], 'worklet');
+      capture = new MicCapture(ctx, stream, [source, node, mute], 'worklet', () => {
+        node.port.postMessage('stop');
+        node.port.onmessage = null;
+        node.port.close();
+      });
       node.port.onmessage = (e: MessageEvent<{ frame: number; data: Float32Array }>) =>
         capture.receive(e.data.data, e.data.frame);
     } catch {
@@ -107,13 +118,16 @@ export class MicCapture {
       const node = ctx.createScriptProcessor(1024, 1, 1);
       source.connect(node);
       node.connect(mute);
-      capture = new MicCapture(ctx, stream, [source, node, mute], 'script-processor');
+      capture = new MicCapture(ctx, stream, [source, node, mute], 'script-processor', () => {
+        node.onaudioprocess = null;
+      });
       // playbackTime is read on the main thread and jitters, so only the first block is stamped from it;
-      // later blocks continue the sample count, which keeps the timeline free of invented gaps.
+      // later blocks continue the sample count, which keeps the timeline free of invented gaps. playbackTime
+      // is when the matching output block plays, about one more buffer after its input was captured.
       let next = -1;
       node.onaudioprocess = (e) => {
         const data = new Float32Array(e.inputBuffer.getChannelData(0));
-        if (next < 0) next = Math.max(0, Math.round(e.playbackTime * ctx.sampleRate) - data.length);
+        if (next < 0) next = Math.max(0, Math.round(e.playbackTime * ctx.sampleRate) - 2 * data.length);
         capture.receive(data, next);
         next += data.length;
       };
@@ -139,10 +153,13 @@ export class MicCapture {
     this.nextFrame = frame + data.length;
   }
 
+  /** Stop the microphone and drop every handler, so nothing keeps this take's recording alive. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     this.listener = null;
+    this.onEnded = null;
+    this.release();
     for (const n of this.nodes) n.disconnect();
     for (const t of this.stream.getTracks()) t.stop();
   }
@@ -160,13 +177,17 @@ export class TakeRecorder {
     this.length += data.length;
   }
 
-  merge(): Float32Array {
-    const out = new Float32Array(this.length);
+  get samples(): number {
+    return this.length;
+  }
+
+  /** Copy the take into `target` (at least `samples` long) and release the chunks. */
+  moveInto(target: Float32Array): void {
     let p = 0;
     for (const c of this.chunks) {
-      out.set(c, p);
+      target.set(c, p);
       p += c.length;
     }
-    return out;
+    this.chunks = [];
   }
 }

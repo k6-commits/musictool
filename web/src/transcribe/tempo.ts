@@ -1,7 +1,7 @@
 // Tempo guess for a take sung without a click (e.g. an uploaded voice memo).
 // For each tempo, fit the phase of an eighth-note grid to the onsets (circular mean), score how well the
 // onsets sit on that grid (with a mild preference for tempos around 100 BPM), and put bar 1 on the grid
-// line nearest to the first note.
+// line nearest to the first note, or earlier if that line would cut into the first note (a pickup).
 
 export interface TempoGuess {
   bpm: number;
@@ -9,9 +9,12 @@ export interface TempoGuess {
   zero: number;
 }
 
-export function estimateTempo(onsets: number[]): TempoGuess | null {
-  const sorted = [...onsets].sort((a, b) => a - b);
-  if (sorted.length < 4) return null;
+export function estimateTempo(notes: { start: number; end: number }[]): TempoGuess | null {
+  if (notes.length < 4) return null;
+  const sorted = notes.map((n) => n.start).sort((a, b) => a - b);
+  const first = notes.reduce((a, b) => (b.start < a.start ? b : a));
+  // Bar 1 may cut at most 30 % off the front of the first note.
+  const latest = first.start + 0.3 * (first.end - first.start);
   const sigma = 0.035;
   let best: TempoGuess | null = null;
   let bestScore = -Infinity;
@@ -37,7 +40,8 @@ export function estimateTempo(onsets: number[]): TempoGuess | null {
     const score = (fit - chance) * prior;
     if (score > bestScore) {
       bestScore = score;
-      const zero = phase + Math.round((sorted[0] - phase) / grid) * grid;
+      let zero = phase + Math.round((first.start - phase) / grid) * grid;
+      while (zero > latest) zero -= grid;
       best = { bpm, zero: Math.max(0, zero) };
     }
   }
