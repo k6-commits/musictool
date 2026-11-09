@@ -1,0 +1,23 @@
+{
+  "name": "musictool-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "musictool Phase 0 prototype: sing or hum, detect pitch, turn it into notes, export MIDI",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p .",
+    "eval": "node scripts/eval.mjs",
+    "e2e": "node scripts/build.mjs && node e2e/run.mjs"
+  },
+  "devDependencies": {
+    "@tonejs/midi": "2.0.28",
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}
