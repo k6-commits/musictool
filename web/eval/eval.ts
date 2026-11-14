@@ -2,7 +2,7 @@
 // (detune, noise, vibrato, tempo, range); it is not a substitute for testing with real voices.
 import { analyzePitch, type InputMode } from '../src/dsp/pitch';
 import { scoreNotes } from '../src/transcribe/score';
-import { SEGMENT_PARAMS, transcribe } from '../src/transcribe/segment';
+import { segmentParams, transcribe } from '../src/transcribe/segment';
 import { sing, type SungNote } from '../src/synth/voice';
 
 interface Case {
@@ -71,8 +71,8 @@ for (const c of CASES) {
     seed: 11,
   });
   const mode = c.mode ?? 'sing';
-  const { frames, stats } = await analyzePitch(audio, 48000, mode);
-  const t = transcribe(frames, SEGMENT_PARAMS[mode]);
+  const { frames, stats, engine } = await analyzePitch(audio, 48000, mode);
+  const t = transcribe(frames, segmentParams(mode, engine));
   const s = scoreNotes(t.notes, ref);
   const errs: number[] = [];
   for (const r of ref) {

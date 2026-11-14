@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { analyzePitch } from '../src/dsp/pitch';
-import { SEGMENT_PARAMS, transcribe } from '../src/transcribe/segment';
+import { analyzePitch, type InputMode, type PitchEngine } from '../src/dsp/pitch';
+import { segmentParams, transcribe } from '../src/transcribe/segment';
 import { SAMPLE_MELODY, sing, type SungNote } from '../src/synth/voice';
 import { scoreNotes } from '../src/transcribe/score';
 
-async function run(notes: SungNote[], opts: Parameters<typeof sing>[1], mode: 'sing' | 'hum' | 'whistle' = 'sing') {
-  const audio = sing(notes, opts);
-  const { frames } = await analyzePitch(audio, opts.sampleRate, mode);
-  return transcribe(frames, SEGMENT_PARAMS[mode]);
+/** Notes from audio, analyzed by the mode's engine (or the given one) with that engine's segmentation. */
+async function analyzeNotes(audio: Float32Array, sampleRate: number, mode: InputMode = 'sing', engine?: PitchEngine) {
+  const a = await analyzePitch(audio, sampleRate, mode, undefined, engine);
+  return transcribe(a.frames, segmentParams(mode, a.engine));
+}
+
+async function run(notes: SungNote[], opts: Parameters<typeof sing>[1], mode: InputMode = 'sing', engine?: PitchEngine) {
+  return analyzeNotes(sing(notes, opts), opts.sampleRate, mode, engine);
 }
 
 describe('pipeline on synthetic singing', () => {
@@ -52,7 +56,7 @@ describe('pipeline on synthetic singing', () => {
   });
 
   it('returns nothing for silence', async () => {
-    const t = transcribe((await analyzePitch(new Float32Array(48000), 48000, 'sing')).frames, SEGMENT_PARAMS.sing);
+    const t = await analyzeNotes(new Float32Array(48000), 48000);
     expect(t.notes.length).toBe(0);
   });
 
@@ -83,7 +87,7 @@ describe('pipeline on synthetic singing', () => {
   it('splits repeated notes at voiced dips but not at tremolo', async () => {
     const sr = 48000;
     const long = sing([{ pitch: 60, start: 0.1, dur: 2.1 }], { sampleRate: sr, vibratoCents: 0 });
-    const analyze = async (audio: Float32Array) => transcribe((await analyzePitch(audio, sr, 'sing')).frames, SEGMENT_PARAMS.sing);
+    const analyze = (audio: Float32Array) => analyzeNotes(audio, sr);
     const dipped = long.map((v, i) => {
       const t = i / sr;
       let g = 1;
@@ -128,7 +132,7 @@ describe('pipeline on synthetic singing', () => {
         for (let h = 1; h <= 6; h++) v += Math.sin(h * phase) / h;
         out[i] = 0.15 * Math.max(0, edge) * v;
       }
-      const t = transcribe((await analyzePitch(out, sr, 'sing')).frames, SEGMENT_PARAMS.sing);
+      const t = await analyzeNotes(out, sr);
       expect(t.notes.map((n) => Math.round(n.pitch)), `${noteSec * 1000} ms notes, drift ${drift}`).toEqual(pitches);
     }
   });
@@ -138,7 +142,7 @@ describe('pipeline on synthetic singing', () => {
     const notes: SungNote[] = [62, 64, 66, 67].map((p, i) => ({ pitch: p, start: 10 + i * 0.4, dur: 0.36 }));
     const voice = sing(notes, { sampleRate: sr, length: 30 });
     const hum = voice.map((v, i) => v + 0.004 * Math.sin((2 * Math.PI * 120 * i) / sr)); // mains hum about -50 dBFS
-    const t = transcribe((await analyzePitch(hum, sr, 'sing')).frames, SEGMENT_PARAMS.sing);
+    const t = await analyzeNotes(hum, sr);
     expect(t.notes.map((n) => Math.round(n.pitch))).toEqual([62, 64, 66, 67]);
     expect(t.notes.every((n) => !n.flagged && n.velocity < 127)).toBe(true);
   });

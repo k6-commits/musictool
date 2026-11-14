@@ -18,7 +18,8 @@ export async function buildPages({ minify = true } = {}) {
     target: 'es2022',
     minify,
     write: false,
-    legalComments: 'none',
+    // Keep /*! */ notices (the SwiftF0 weights' MIT license) at the end of the script.
+    legalComments: 'eof',
   });
   const js = result.outputFiles[0].text.replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
   const css = (await readFile(join(root, 'src/styles.css'), 'utf8')).replace(/<\/style/gi, '<\\/style');

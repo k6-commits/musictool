@@ -2,13 +2,13 @@
 import { buildFiles, packageFiles, safeName, saveWithLink, type ExportKind } from './app/files';
 import { MicCapture, TakeRecorder } from './audio/capture';
 import { INSTRUMENTS, Player, type Instrument } from './audio/player';
-import { analyzePitch, HOP_SEC, LivePitch, type AnalyzeStats, type InputMode, type PitchFrame } from './dsp/pitch';
+import { analyzePitch, engineFor, HOP_SEC, LivePitch, type Analysis, type AnalyzeStats, type InputMode, type PitchEngine, type PitchFrame } from './dsp/pitch';
 import { detectKey } from './music/keydetect';
 import { centsOff, hzToMidi, isBlackKey, noteName, type MiddleC, type Notation } from './music/notes';
 import { ALL_KEYS, keyFromId, keyId, keyShort, type Key } from './music/scale';
 import { makeSample, SAMPLE_BPM } from './synth/voice';
 import { arrange, quantizeValue, secondsToBeats, type ArrangedNote } from './transcribe/arrange';
-import { SEGMENT_PARAMS, transcribe, type RawNote, type Transcription } from './transcribe/segment';
+import { SEGMENT_PARAMS, segmentParams, transcribe, type RawNote, type Transcription } from './transcribe/segment';
 import { estimateTempo } from './transcribe/tempo';
 import { Knob, releaseFocusAfterPointer } from './ui/knob';
 import { fitRange, PianoRoll, type RollNote, type RollView } from './ui/roll';
@@ -75,6 +75,8 @@ interface Take {
   /** Seconds in `audio` where bar 1 starts. */
   zero: number;
   mode: InputMode;
+  /** The pitch engine that analyzed the take. */
+  engine: PitchEngine;
   trans: Transcription;
   stats: AnalyzeStats;
   /** Waveform-lane envelope, one value per frame (0..1). */
@@ -468,13 +470,13 @@ interface TakeInput {
   buffer: AudioBuffer;
   /** Bar 1 and tempo when known (a take recorded to the click); otherwise both are guessed from the notes. */
   timing?: { zero: number; bpm: number };
-  /** Pitch frames already computed with the current input mode (live, while recording). */
-  analysis?: { frames: PitchFrame[]; stats: AnalyzeStats };
+  /** Pitch frames already computed with the current input mode and its engine (live YIN, while recording). */
+  analysis?: Analysis;
   /** A re-analysis of the same audio: what to keep from the earlier analysis (the view also stays put). */
   carried?: Carried;
 }
 
-function envelopeOf(frames: PitchFrame[]): Float32Array {
+function envelopeOf(frames: Analysis['frames']): Float32Array {
   let maxRms = 1e-9;
   for (const f of frames) maxRms = Math.max(maxRms, f.rms);
   const peaks = new Float32Array(frames.length);
@@ -492,12 +494,12 @@ async function loadTake(input: TakeInput): Promise<void> {
   renderTransport();
   try {
     const mode = P.mode;
-    const { frames, stats } =
+    const { frames, stats, engine } =
       input.analysis ??
       (await analyzePitch(input.buffer.getChannelData(0), input.buffer.sampleRate, mode, (p) => {
         el.busyBar.style.width = `${Math.round(p * 100)}%`;
       }));
-    const trans = transcribe(frames, SEGMENT_PARAMS[mode]);
+    const trans = transcribe(frames, segmentParams(mode, engine));
     let zero = input.timing?.zero ?? 0;
     let bpm = input.timing?.bpm ?? S.bpm;
     if (!input.timing) {
@@ -522,6 +524,7 @@ async function loadTake(input: TakeInput): Promise<void> {
       sampleRate: input.buffer.sampleRate,
       zero,
       mode,
+      engine,
       trans,
       stats,
       peaks: envelopeOf(frames),
@@ -893,14 +896,16 @@ async function stopRecording(): Promise<void> {
   // The take goes straight into the buffer it is played from (no intermediate copy).
   const buffer = monoBuffer(r.recorder.samples, r.sampleRate);
   r.recorder.moveInto(buffer.getChannelData(0));
-  // The live tracker already analyzed every chunk; finishing it gives the frames an offline pass would.
-  const frames = r.frames.concat(r.live.finish());
+  // The live tracker (YIN) already analyzed every chunk. When YIN is also the engine for this mode, finishing it
+  // gives the frames an offline pass would; otherwise the take is analyzed by its engine now.
+  const live = engineFor(r.mode) === 'yin';
+  const frames = live ? r.frames.concat(r.live.finish()) : [];
   await loadTake({
     name: stampName(),
     source: 'mic',
     buffer,
     timing: { zero, bpm: r.bpm },
-    analysis: { frames, stats: { millisPerFrame: r.live.millisPerFrame } },
+    analysis: live ? { frames, stats: { millisPerFrame: r.live.millisPerFrame }, engine: 'yin' } : undefined,
   });
 }
 
@@ -1413,6 +1418,7 @@ function renderMeasure(): void {
   const rows: [string, string][] = [];
   if (t) {
     const msPerFrame = t.stats.millisPerFrame;
+    rows.push(['音程', t.engine === 'swiftf0' ? 'SwiftF0' : 'YIN']);
     rows.push(['解析', `${msPerFrame.toFixed(2)} ms / 16 ms 枠`]);
     rows.push(['速さ', `×${Math.round((HOP_SEC * 1000) / Math.max(0.001, msPerFrame))} 実時間`]);
     rows.push(['有声', `${Math.round(t.trans.voicedRatio * 100)} %`]);

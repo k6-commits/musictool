@@ -1,3 +1,6 @@
 node_modules/
 web/dist/
 web/e2e/out/
+
+# real-voice evaluation data (downloaded, not redistributed)
+web/eval/data/

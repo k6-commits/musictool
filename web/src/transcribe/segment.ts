@@ -1,7 +1,7 @@
 // Pitch frames -> notes.
 // 1. keep confident, loud-enough frames  2. fix octave jumps  3. remove the singer's global tuning offset
 // 4. split into notes on pitch changes, silences and re-articulations  5. merge / drop fragments.
-import { HOP_SEC, type InputMode, type PitchFrame } from '../dsp/pitch';
+import { HOP_SEC, type InputMode, type PitchEngine, type PitchFrame } from '../dsp/pitch';
 import { hzToMidi } from '../music/notes';
 
 export interface SegmentParams {
@@ -23,6 +23,11 @@ export const SEGMENT_PARAMS: Record<InputMode, SegmentParams> = {
   hum: { confThreshold: 0.6, minDuration: 0.1, splitSemitones: 0.7, holdFrames: 3, gapFrames: 3, dropoutFrames: 6 },
   whistle: { confThreshold: 0.7, minDuration: 0.06, splitSemitones: 0.7, holdFrames: 2, gapFrames: 2, dropoutFrames: 4 },
 };
+
+/** Parameters for frames from a pitch engine: SwiftF0's confidence is calibrated so that 0.5 means voiced. */
+export function segmentParams(mode: InputMode, engine: PitchEngine): SegmentParams {
+  return engine === 'swiftf0' ? { ...SEGMENT_PARAMS[mode], confThreshold: 0.5 } : SEGMENT_PARAMS[mode];
+}
 
 export type FlagReason = 'ambiguous' | 'unstable' | 'short';
 
