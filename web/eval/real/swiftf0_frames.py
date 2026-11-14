@@ -28,7 +28,8 @@ for path in paths:
     model_seconds += time.perf_counter() - t0
     audio_seconds += len(audio) / sr
     name = os.path.splitext(os.path.basename(path))[0]
+    # Full precision, so that comparisons with the port are not limited by rounding.
     with open(os.path.join(out_dir, name + ".json"), "w") as f:
-        json.dump({"t": np.round(r.timestamps, 6).tolist(), "f0": np.round(r.pitch_hz, 3).tolist(),
-                   "conf": np.round(r.confidence, 4).tolist(), "db": np.round(r.loudness_db, 2).tolist()}, f)
+        json.dump({"t": r.timestamps.tolist(), "f0": r.pitch_hz.tolist(),
+                   "conf": r.confidence.tolist(), "db": r.loudness_db.tolist()}, f)
 print(f"{len(paths)} files, {audio_seconds:.1f} s of audio, {1000 * model_seconds / max(1, audio_seconds / 0.016):.3f} ms per 16 ms frame")

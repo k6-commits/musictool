@@ -4,7 +4,8 @@
     python scripts/export-swiftf0.py [path/to/model.onnx]
 
 Writes the network's weights (BatchNorm already folded in by the export), the STFT windows and the sparse
-log-frequency filters as base64 float32, in the order src/dsp/swiftf0/model.ts runs them.
+log-frequency filters as base64 float32, in the order src/dsp/swiftf0/model.ts runs them. (The pitch-bin centers
+are a geometric series that model.ts computes; the script checks that they still are.)
 """
 import base64
 import hashlib
@@ -62,8 +63,10 @@ for size, node in zip((1024, 2048, 512), scatter):
         lengths.append(hi - lo)
         weights.append(row[lo:hi])
     filters.append({"starts": starts, "lengths": lengths, "w": b64(np.concatenate(weights))})
+# The 95 pitch-bin centers are float32 geomspace(46.875, 2093.75, 95); model.ts derives them, check that it may.
 centers = [init[n.input[0]] for n in graph.node if n.op_type == "GreaterOrEqual"][0]
-assert centers.shape == (95,)
+derived = (46.875 * (2093.75 / 46.875) ** (np.arange(95) / 94)).astype(np.float32)
+assert np.array_equal(centers, derived), "pitch-bin centers are not the expected geometric series"
 
 out = os.path.join(here, "..", "src", "dsp", "swiftf0", "weights.ts")
 with open(out, "w") as f:
@@ -94,6 +97,5 @@ with open(out, "w") as f:
     f.write("export const FILTERS: { starts: number[]; lengths: number[]; w: string }[] = [\n")
     for flt in filters:
         f.write(f"  {{ starts: {flt['starts']}, lengths: {flt['lengths']}, w: '{flt['w']}' }},\n")
-    f.write("];\n\n")
-    f.write(f"/** Pitch of the 95 output bins (Hz). */\nexport const CENTERS = '{b64(centers)}';\n")
+    f.write("];\n")
 print(f"wrote {out}: {len(convs)} convolutions, {sum(int(np.prod(c['shape'])) for c in convs)} weights")

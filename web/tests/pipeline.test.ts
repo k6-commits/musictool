@@ -6,7 +6,7 @@ import { scoreNotes } from '../src/transcribe/score';
 
 /** Notes from audio, analyzed by the mode's engine (or the given one) with that engine's segmentation. */
 async function analyzeNotes(audio: Float32Array, sampleRate: number, mode: InputMode = 'sing', engine?: PitchEngine) {
-  const a = await analyzePitch(audio, sampleRate, mode, undefined, engine);
+  const a = await analyzePitch(audio, sampleRate, mode, { engine });
   return transcribe(a.frames, segmentParams(mode, a.engine));
 }
 
@@ -14,16 +14,21 @@ async function run(notes: SungNote[], opts: Parameters<typeof sing>[1], mode: In
   return analyzeNotes(sing(notes, opts), opts.sampleRate, mode, engine);
 }
 
-describe('pipeline on synthetic singing', () => {
+// The analysis engine for singing and humming (SwiftF0) and the live view's (YIN) both have to pass.
+describe.each(['swiftf0', 'yin'] as const)('pipeline on synthetic singing (%s)', (engine) => {
+  const pick = (mode: InputMode) => (mode === 'whistle' ? undefined : engine);
+  const r = (notes: SungNote[], opts: Parameters<typeof sing>[1], mode: InputMode = 'sing') => run(notes, opts, mode, pick(mode));
+  const an = (audio: Float32Array, sampleRate: number, mode: InputMode = 'sing') => analyzeNotes(audio, sampleRate, mode, pick(mode));
+
   it('transcribes the sample melody', async () => {
-    const t = await run(SAMPLE_MELODY, { sampleRate: 48000, detuneCents: 12, noiseDb: -38 });
+    const t = await r(SAMPLE_MELODY, { sampleRate: 48000, detuneCents: 12, noiseDb: -38 });
     const s = scoreNotes(t.notes, SAMPLE_MELODY);
     expect(s.f1).toBeGreaterThanOrEqual(0.9);
     expect(Math.abs(t.tuningCents - 12)).toBeLessThanOrEqual(8);
   });
 
   it('flags the note sung between two pitches', async () => {
-    const t = await run(SAMPLE_MELODY, { sampleRate: 48000, detuneCents: 12, noiseDb: -38 });
+    const t = await r(SAMPLE_MELODY, { sampleRate: 48000, detuneCents: 12, noiseDb: -38 });
     // F4 sung 55 cents sharp (+12 global, removed by tuning) sits between F and F#.
     const f = t.notes.find((n) => Math.abs(n.start - SAMPLE_MELODY[8].start) < 0.08);
     expect(f?.flagged).toBe(true);
@@ -36,14 +41,14 @@ describe('pipeline on synthetic singing', () => {
       { pitch: 60, start: 0.9, dur: 0.35 },
       { pitch: 62, start: 1.3, dur: 0.5 },
     ];
-    const t = await run(notes, { sampleRate: 44100 });
+    const t = await r(notes, { sampleRate: 44100 });
     expect(t.notes.length).toBe(4);
   });
 
   it('handles a low male voice and a high female voice', async () => {
     for (const base of [43, 72]) {
       const notes: SungNote[] = [0, 2, 4, 5, 7, 5, 4, 2].map((d, i) => ({ pitch: base + d, start: 0.1 + i * 0.4, dur: 0.36 }));
-      const t = await run(notes, { sampleRate: 48000, noiseDb: -35 });
+      const t = await r(notes, { sampleRate: 48000, noiseDb: -35 });
       const s = scoreNotes(t.notes, notes);
       expect(s.f1).toBeGreaterThanOrEqual(0.85);
     }
@@ -51,12 +56,12 @@ describe('pipeline on synthetic singing', () => {
 
   it('works for whistling', async () => {
     const notes: SungNote[] = [79, 81, 83, 84, 86].map((p, i) => ({ pitch: p, start: 0.1 + i * 0.3, dur: 0.26 }));
-    const t = await run(notes, { sampleRate: 48000, vibratoCents: 10 }, 'whistle');
+    const t = await r(notes, { sampleRate: 48000, vibratoCents: 10 }, 'whistle');
     expect(scoreNotes(t.notes, notes).f1).toBeGreaterThanOrEqual(0.85);
   });
 
   it('returns nothing for silence', async () => {
-    const t = await analyzeNotes(new Float32Array(48000), 48000);
+    const t = await an(new Float32Array(48000), 48000);
     expect(t.notes.length).toBe(0);
   });
 
@@ -65,7 +70,7 @@ describe('pipeline on synthetic singing', () => {
       [150, 0.1],
       [200, 0.15],
     ]) {
-      const t = await run(SAMPLE_MELODY, { sampleRate: 48000, scoopCents: cents, scoopSec: sec, noiseDb: -40 });
+      const t = await r(SAMPLE_MELODY, { sampleRate: 48000, scoopCents: cents, scoopSec: sec, noiseDb: -40 });
       const s = scoreNotes(t.notes, SAMPLE_MELODY);
       expect(s.f1, `${cents} cents over ${sec} s`).toBeGreaterThanOrEqual(0.9);
     }
@@ -73,13 +78,13 @@ describe('pipeline on synthetic singing', () => {
 
   it('finds notes in a quiet take sung without pauses', async () => {
     const notes: SungNote[] = [60, 62, 64, 65, 67, 65, 64, 62, 60, 62].map((p, i) => ({ pitch: p, start: i * 0.5, dur: 0.5 }));
-    const t = await run(notes, { sampleRate: 48000, gain: 0.05, length: 5, legato: true }); // about -40 dBFS, no silence at all
+    const t = await r(notes, { sampleRate: 48000, gain: 0.05, length: 5, legato: true }); // about -40 dBFS, no silence at all
     expect(scoreNotes(t.notes, notes).recall).toBeGreaterThanOrEqual(0.9);
   });
 
   it('gives the same velocities whatever the mic gain', async () => {
-    const loud = await run(SAMPLE_MELODY, { sampleRate: 48000, noiseDb: -40 });
-    const soft = await run(SAMPLE_MELODY, { sampleRate: 48000, noiseDb: -40, gain: 0.1 });
+    const loud = await r(SAMPLE_MELODY, { sampleRate: 48000, noiseDb: -40 });
+    const soft = await r(SAMPLE_MELODY, { sampleRate: 48000, noiseDb: -40, gain: 0.1 });
     expect(soft.notes.length).toBe(loud.notes.length);
     soft.notes.forEach((n, i) => expect(Math.abs(n.velocity - loud.notes[i].velocity)).toBeLessThanOrEqual(3));
   });
@@ -87,7 +92,7 @@ describe('pipeline on synthetic singing', () => {
   it('splits repeated notes at voiced dips but not at tremolo', async () => {
     const sr = 48000;
     const long = sing([{ pitch: 60, start: 0.1, dur: 2.1 }], { sampleRate: sr, vibratoCents: 0 });
-    const analyze = (audio: Float32Array) => analyzeNotes(audio, sr);
+    const analyze = (audio: Float32Array) => an(audio, sr);
     const dipped = long.map((v, i) => {
       const t = i / sr;
       let g = 1;
@@ -106,7 +111,7 @@ describe('pipeline on synthetic singing', () => {
     // Sixteenths at 130 BPM, each starting with the usual small scoop, sung without breaks.
     const spb = 60 / 130;
     const notes: SungNote[] = [60, 62, 64, 65, 67, 69, 71, 72].map((p, i) => ({ pitch: p, start: 0.2 + i * spb * 0.25, dur: spb * 0.25 }));
-    const t = await run(notes, { sampleRate: 48000 });
+    const t = await r(notes, { sampleRate: 48000 });
     expect(t.notes.map((n) => Math.round(n.pitch))).toEqual(notes.map((n) => n.pitch));
   });
 
@@ -132,7 +137,7 @@ describe('pipeline on synthetic singing', () => {
         for (let h = 1; h <= 6; h++) v += Math.sin(h * phase) / h;
         out[i] = 0.15 * Math.max(0, edge) * v;
       }
-      const t = await analyzeNotes(out, sr);
+      const t = await an(out, sr);
       expect(t.notes.map((n) => Math.round(n.pitch)), `${noteSec * 1000} ms notes, drift ${drift}`).toEqual(pitches);
     }
   });
@@ -142,7 +147,7 @@ describe('pipeline on synthetic singing', () => {
     const notes: SungNote[] = [62, 64, 66, 67].map((p, i) => ({ pitch: p, start: 10 + i * 0.4, dur: 0.36 }));
     const voice = sing(notes, { sampleRate: sr, length: 30 });
     const hum = voice.map((v, i) => v + 0.004 * Math.sin((2 * Math.PI * 120 * i) / sr)); // mains hum about -50 dBFS
-    const t = await analyzeNotes(hum, sr);
+    const t = await an(hum, sr);
     expect(t.notes.map((n) => Math.round(n.pitch))).toEqual([62, 64, 66, 67]);
     expect(t.notes.every((n) => !n.flagged && n.velocity < 127)).toBe(true);
   });

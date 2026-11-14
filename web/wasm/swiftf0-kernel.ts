@@ -87,7 +87,8 @@ export function conv(
               for (let q = 0; q < 4; q++) {
                 const wb = wBase + <usize>q * wq;
                 const d = d0 + <usize>q * outPlane + off;
-                store<f32>(d, load<f32>(d) + load<f32>(wb) * xm + load<f32>(wb + 4) * x0 + load<f32>(wb + 8) * xp);
+                // Same order of additions as the SIMD body, so a frame's value does not depend on its column.
+                store<f32>(d, load<f32>(d) + (load<f32>(wb) * xm + (load<f32>(wb + 4) * x0 + load<f32>(wb + 8) * xp)));
               }
             }
           }

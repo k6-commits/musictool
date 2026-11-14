@@ -26,8 +26,14 @@ export interface PRF {
   matched: number;
 }
 
-// mir_eval rounds time differences to 4 decimals so that an exact 50 ms difference counts as a hit.
-const round4 = (x: number) => Math.round(x * 1e4) / 1e4;
+// mir_eval rounds time differences to 4 decimals (numpy: halves to even) so that an exact 50 ms difference counts
+// as a hit.
+const round4 = (x: number) => {
+  const v = x * 1e4;
+  const f = Math.floor(v);
+  const r = v - f === 0.5 ? (f % 2 === 0 ? f : f + 1) : Math.round(v);
+  return r / 1e4;
+};
 const cents = (a: number, b: number) => Math.abs(1200 * Math.log2(a / b));
 
 /** Reference index -> matched detected index (maximum matching). */

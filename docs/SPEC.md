@@ -587,7 +587,7 @@ DAW 動作確認の対象（○ = 確認する、✕ = DAW 側が非対応、—
 |---|---|---|
 | Phase 0 技術検証 | F0 エンジンの比較、iPhone Safari / Android Chrome での遅延計測、ノート分割の試作 | エンジン比較表（精度・速度・端末別遅延）ができ、スマホで「録音 → .mid 書き出し → DAW で開く」まで動く |
 
-Phase 0 の進捗（2026-11-14）: [web/](../web/README.md) に試作。音程検出 → ノート分割 → 編集 → MIDI / WAV 書き出しが PC ブラウザで動く（合成音声 17 条件でノート F1 1.00）。本物の声（vocadito の独唱 40 曲、HumTrans のハミング 120 本）と実環境の雑音（DEMAND）で YIN と SwiftF0 を比べた（[web/eval/README.md](../web/eval/README.md)）。静かな録音では同程度（歌のノート F1 は 65〜67 %、採譜者どうしの一致は 74 %）で、雑音下では SwiftF0 が大きく上回った（カフェテリア 0 dB で 51 % 対 18 %）。そこで歌声・ハミングは SwiftF0（TypeScript と WebAssembly SIMD に移植、1 フレーム約 0.7 ms）、口笛は YIN にした。残りは PESTO / Basic Pitch との比較、子どもの声・スマホのマイクでの評価、実機での遅延計測、DAW での読み込み確認。
+Phase 0 の進捗（2026-11-14）: [web/](../web/README.md) に試作。音程検出 → ノート分割 → 編集 → MIDI / WAV 書き出しが PC ブラウザで動く（合成音声 17 条件でノート F1 1.00）。本物の声（vocadito の独唱 40 曲、HumTrans のハミング 120 本）と実環境の雑音（DEMAND）で YIN と SwiftF0 を比べた（[web/eval/README.md](../web/eval/README.md)）。静かな録音では同程度（歌のノート F1 は 68〜69 %、採譜者どうしの一致は 74 %）で、雑音下では SwiftF0 が大きく上回った（カフェテリア 0 dB で 53 % 対 17 %）。そこで歌声・ハミングは SwiftF0（TypeScript と WebAssembly SIMD に移植、1 フレーム約 0.5 ms。入力の音量に左右されるので解析前に音量をそろえる）、口笛は YIN にした。残りは PESTO / Basic Pitch との比較、子どもの声・スマホのマイクでの評価、実機での遅延計測、DAW での読み込み確認。
 | Phase 1 MVP | F-01〜F-12 | 9 章の精度目標を満たし、主要 DAW 6 種で読み込みを確認 |
 | Phase 2 | F-20〜F-29（DAW 連携のレベル 2 を含む） | PC ブラウザから主要 DAW へ、ライブ MIDI と同期録音ができる |
 | Phase 3 | F-30〜F-37（DAW プラグインを含む） | プラグインが主要 DAW で動き、Web 版と同じ解析結果になる |

@@ -116,7 +116,9 @@ async function remoteZip(url) {
 
 async function vocadito() {
   const dir = join(root, 'vocadito');
-  if (existsSync(join(dir, 'Audio', 'vocadito_40.wav'))) return console.log('vocadito: already there');
+  // Written after the last file, so an interrupted extraction is redone.
+  const done = join(dir, '.complete');
+  if (existsSync(done)) return console.log('vocadito: already there');
   console.log('vocadito: downloading 58 MB from Zenodo ...');
   const zip = await localZip(await get('https://zenodo.org/api/records/5578807/files/vocadito.zip/content'));
   let n = 0;
@@ -125,6 +127,7 @@ async function vocadito() {
     await save(join(dir, name), await zip.extract(name));
     n++;
   }
+  await save(done, new Uint8Array(0));
   console.log(`vocadito: ${n} files`);
 }
 

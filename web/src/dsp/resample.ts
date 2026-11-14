@@ -145,11 +145,11 @@ export class AlignedResampler {
 /** Offline conversion of a whole buffer, compensating the filter delay. */
 export function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
   if (fromRate === toRate) return input.slice();
-  const r = new Resampler(fromRate, toRate);
-  const head = r.process(input);
-  const tail = r.process(new Float32Array(r.flushLength));
+  const r = new AlignedResampler(fromRate, toRate);
+  const head = r.push(input);
+  const tail = r.finish();
   const all = new Float32Array(head.length + tail.length);
   all.set(head);
   all.set(tail, head.length);
-  return all.slice(r.skip, r.skip + r.outputLength(input.length));
+  return all;
 }

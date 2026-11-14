@@ -62,7 +62,8 @@ export function vocadito(root: string): Item[] {
 /**
  * HumTrans (Liu et al. 2023, CC BY-NC 4.0): hummed melodies with the melody as MIDI. A person-balanced subset
  * of the official test split (12 recordings from each of the 10 people). The MIDI is the score the hummers
- * followed: the recordings lag it by about 0.1-0.4 s, and many low voices hummed an octave below it.
+ * followed: the recordings lag it by up to 1.5 s (most by 0.1-0.4 s), and many low voices hummed an octave (one
+ * recording two octaves) below it. eval/real.ts fits both per recording.
  */
 export function humtrans(root: string): Item[] {
   const dir = join(root, 'humtrans');

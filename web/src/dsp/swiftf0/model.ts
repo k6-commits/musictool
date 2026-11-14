@@ -6,12 +6,12 @@
 // The convolutions run in a small WebAssembly SIMD kernel (wasm/swiftf0-kernel.ts) when the browser has it, and in
 // plain TypeScript otherwise; both give the same numbers up to float rounding.
 import { KERNEL_WASM } from './kernel';
-import { CENTERS, CONVS, FILTERS, WINDOWS } from './weights';
+import { CONVS, FILTERS, WINDOWS } from './weights';
 
-export const SF0_RATE = 16000;
 export const SF0_HOP = 256;
-export const SF0_MIN_HZ = 46.875;
-export const SF0_MAX_HZ = 2093.75;
+/** The 95 output bins are spaced evenly in log frequency from MIN_HZ to MAX_HZ. */
+const MIN_HZ = 46.875;
+const MAX_HZ = 2093.75;
 /** Frames of context the network needs on each side of a frame. */
 export const SF0_CONTEXT = 7;
 
@@ -40,10 +40,9 @@ interface Conv {
   /** Kernel rows (frequency) and columns (time: 1, or 3 for frames t - 1, t, t + 1). */
   kh: number;
   kw: number;
-  /** Dilation and padding along frequency. */
+  /** Dilation and padding (before) along frequency. */
   dh: number;
   ph0: number;
-  ph1: number;
   w: Float32Array;
   b: Float32Array;
 }
@@ -235,7 +234,6 @@ class WasmBackend implements Backend {
 // ---------------------------------------------------------------- model
 
 interface Net {
-  convs: Conv[];
   backend: Backend;
   windows: Float32Array[];
   filters: { starts: number[]; lengths: number[]; offsets: number[]; w: Float32Array }[];
@@ -266,7 +264,6 @@ function load(): Net {
       kw: twoD ? k2 : k1,
       dh: twoD ? c.dilation[0] : 1,
       ph0: twoD ? c.pads[0] : 0,
-      ph1: twoD ? c.pads[2] : 0,
       w: floats(c.w),
       b: floats(c.b),
     };
@@ -283,7 +280,8 @@ function load(): Net {
     }
     return { starts: f.starts, lengths: f.lengths, offsets, w: floats(f.w) };
   });
-  const logCenters = Float64Array.from(floats(CENTERS), (c) => Math.log(c));
+  // Bin centers as the model stores them (float32), then their logs for decoding.
+  const logCenters = Float64Array.from({ length: N_BINS }, (_, b) => Math.log(Math.fround(MIN_HZ * Math.pow(MAX_HZ / MIN_HZ, b / (N_BINS - 1)))));
   let backend: Backend = new JsBackend(convs);
   if (!forceJs && typeof WebAssembly === 'object') {
     try {
@@ -295,7 +293,7 @@ function load(): Net {
       /* keep the TypeScript kernel */
     }
   }
-  net = { convs, backend, windows: WINDOWS.map(floats), filters, logCenters, ffts: SIZES.map((n) => new Fft(n)) };
+  net = { backend, windows: WINDOWS.map(floats), filters, logCenters, ffts: SIZES.map((n) => new Fft(n)) };
   return net;
 }
 
@@ -304,7 +302,10 @@ export function kernelName(): string {
   return load().backend.name;
 }
 
-/** Radix-2 complex FFT of a real input; the spectrum is left in re / im. */
+/**
+ * Radix-2 complex FFT. Two real frames go through one transform (one as the real part, one as the imaginary part)
+ * and are separated afterwards, which halves the work of the three STFTs.
+ */
 class Fft {
   private readonly rev: Uint32Array;
   private readonly cos: Float64Array;
@@ -330,11 +331,27 @@ class Fft {
     this.im = new Float64Array(n);
   }
 
-  run(input: Float64Array): void {
+  /** Magnitude spectra (bins 0..n/2) of the real frames a and b, into magA and magB. */
+  magnitudes(a: Float64Array, b: Float64Array, magA: Float64Array, magB: Float64Array): void {
+    const { n, re, im } = this;
+    this.run(a, b);
+    for (let k = 0; k <= n / 2; k++) {
+      const j = (n - k) & (n - 1);
+      // A(k) = (Z(k) + conj Z(n-k)) / 2, B(k) = (Z(k) - conj Z(n-k)) / 2i.
+      const ar = re[k] + re[j];
+      const ai = im[k] - im[j];
+      const br = im[k] + im[j];
+      const bi = re[j] - re[k];
+      magA[k] = 0.5 * Math.sqrt(ar * ar + ai * ai);
+      magB[k] = 0.5 * Math.sqrt(br * br + bi * bi);
+    }
+  }
+
+  private run(a: Float64Array, b: Float64Array): void {
     const { n, rev, re, im, cos, sin } = this;
     for (let i = 0; i < n; i++) {
-      re[rev[i]] = input[i];
-      im[rev[i]] = 0;
+      re[rev[i]] = a[i];
+      im[rev[i]] = b[i];
     }
     for (let size = 2; size <= n; size <<= 1) {
       const half = size >> 1;
@@ -400,19 +417,21 @@ export function swiftF0Frames(x: Float32Array, base: number, total: number, firs
     16 * stride,
     stride,
   ]);
-  // Features: 3 STFTs x 128 log-frequency bands x frames.
-  const mag = new Float64Array(1025);
+  // Features: 3 STFTs x 128 log-frequency bands x frames, two frames per FFT.
+  const magA = new Float64Array(1025);
+  const magB = new Float64Array(1025);
   for (let s = 0; s < 3; s++) {
     const size = SIZES[s];
     const fft = n.ffts[s];
     const win = n.windows[s];
-    const frame = new Float64Array(size);
+    const frameA = new Float64Array(size);
+    const frameB = new Float64Array(size);
     const flt = n.filters[s];
-    for (let c = 0; c < cols; c++) {
+    const window = (frame: Float64Array, c: number) => {
       const start = (from + c) * SF0_HOP - size / 2;
       for (let k = 0; k < size; k++) frame[k] = Math.fround(sample(start + k) * win[k]);
-      fft.run(frame);
-      for (let k = 0; k <= size / 2; k++) mag[k] = Math.sqrt(fft.re[k] * fft.re[k] + fft.im[k] * fft.im[k]);
+    };
+    const bands = (mag: Float64Array, c: number) => {
       for (let band = 0; band < N_LOG; band++) {
         let acc = 0;
         const st = flt.starts[band];
@@ -420,6 +439,14 @@ export function swiftF0Frames(x: Float32Array, base: number, total: number, firs
         for (let q = 0; q < flt.lengths[band]; q++) acc += mag[st + q] * flt.w[off + q];
         feat.f[(s * N_LOG + band) * stride + 1 + c] = Math.log(Math.fround(acc) + LOG_FLOOR);
       }
+    };
+    for (let c = 0; c < cols; c += 2) {
+      window(frameA, c);
+      if (c + 1 < cols) window(frameB, c + 1);
+      else frameB.fill(0);
+      fft.magnitudes(frameA, frameB, magA, magB);
+      bands(magA, c);
+      if (c + 1 < cols) bands(magB, c + 1);
     }
   }
   // Network: stem, six residual blocks, projection to 95 pitch bins, pitch and confidence heads.
@@ -494,21 +521,17 @@ export function swiftF0Frames(x: Float32Array, base: number, total: number, firs
 /**
  * SwiftF0 over a stream of 16 kHz samples. A frame is computed once the audio 7 frames (and one 2048-point
  * window) past it has arrived, in batches, so a long take never needs the whole spectrogram in memory; finish()
- * returns the rest. The frames are exactly those of swiftF0Frames on the whole signal.
+ * returns the rest. The frames are exactly those of swiftF0Frames on the whole signal. Each batch is one
+ * synchronous computation of about `batch` + 14 frames (the 7 frames of context on each side are computed again).
  */
 export class SwiftF0Stream {
   private buf = new Float32Array(1 << 16);
   private len = 0;
-  /** Sample index of buf[0]. */
+  /** Sample index of buf[0]; the stream has had base + len samples. */
   private base = 0;
-  private samples = 0;
   private emitted = 0;
 
-  constructor(private readonly batch = 256) {}
-
-  get framesOut(): number {
-    return this.emitted;
-  }
+  constructor(private readonly batch = 128) {}
 
   push(x: Float32Array): Sf0Frames | null {
     if (this.len + x.length > this.buf.length) {
@@ -518,15 +541,14 @@ export class SwiftF0Stream {
     }
     this.buf.set(x, this.len);
     this.len += x.length;
-    this.samples += x.length;
     // Frame i is final when the 2048-point window of frame i + 7 is complete.
-    const ready = Math.floor((this.samples - 1024) / SF0_HOP) - SF0_CONTEXT;
+    const ready = Math.floor((this.base + this.len - 1024) / SF0_HOP) - SF0_CONTEXT;
     if (ready - this.emitted < this.batch) return null;
     return this.run(ready, Number.MAX_SAFE_INTEGER);
   }
 
   finish(): Sf0Frames | null {
-    const total = frameCount(this.samples);
+    const total = frameCount(this.base + this.len);
     return this.emitted < total ? this.run(total, total) : null;
   }
 

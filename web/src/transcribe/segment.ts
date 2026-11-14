@@ -18,9 +18,11 @@ export interface SegmentParams {
   dropoutFrames: number;
 }
 
+// holdFrames and dropoutFrames for singing and humming were set on real recordings: chosen on one half of vocadito
+// and checked on the other half (and on HumTrans, not used for the choice); they help both engines (eval/README.md).
 export const SEGMENT_PARAMS: Record<InputMode, SegmentParams> = {
-  sing: { confThreshold: 0.7, minDuration: 0.08, splitSemitones: 0.7, holdFrames: 3, gapFrames: 2, dropoutFrames: 6 },
-  hum: { confThreshold: 0.6, minDuration: 0.1, splitSemitones: 0.7, holdFrames: 3, gapFrames: 3, dropoutFrames: 6 },
+  sing: { confThreshold: 0.7, minDuration: 0.08, splitSemitones: 0.7, holdFrames: 5, gapFrames: 2, dropoutFrames: 1 },
+  hum: { confThreshold: 0.6, minDuration: 0.1, splitSemitones: 0.7, holdFrames: 5, gapFrames: 3, dropoutFrames: 1 },
   whistle: { confThreshold: 0.7, minDuration: 0.06, splitSemitones: 0.7, holdFrames: 2, gapFrames: 2, dropoutFrames: 4 },
 };
 

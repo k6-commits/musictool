@@ -33,4 +33,4 @@ for (const f of files) {
     if (ref.conf[i] >= 0.5) worstCents = Math.max(worstCents, Math.abs(1200 * Math.log2(out.pitch[i] / ref.f0[i])));
   }
 }
-console.log(`${files.length} files, ${frames} frames: max pitch difference ${worstCents.toFixed(3)} cents (voiced frames), max confidence difference ${worstConf.toExponential(2)}, max level difference ${worstDb.toFixed(3)} dB, voicing flips ${flips}; ${(ms / frames).toFixed(3)} ms per frame`);
+console.log(`${files.length} files, ${frames} frames: max pitch difference ${worstCents.toExponential(2)} cents (voiced frames), max confidence difference ${worstConf.toExponential(2)}, max level difference ${worstDb.toExponential(2)} dB, voicing flips ${flips}; ${(ms / frames).toFixed(3)} ms per frame`);

@@ -77,6 +77,11 @@ interface Take {
   mode: InputMode;
   /** The pitch engine that analyzed the take. */
   engine: PitchEngine;
+  /**
+   * SwiftF0's frames, kept so that switching between singing and humming (both SwiftF0, whose result does not
+   * depend on the mode) only redoes the note segmentation.
+   */
+  sf0?: Analysis;
   trans: Transcription;
   stats: AnalyzeStats;
   /** Waveform-lane envelope, one value per frame (0..1). */
@@ -186,6 +191,10 @@ const S = {
 
 let ctx: AudioContext | null = null;
 let player: Player | null = null;
+/** The take just recorded, shown in the roll while its analysis runs. */
+let recorded: Rec | null = null;
+/** Name of the take being loaded (shown as the title meanwhile). */
+let loadingName: string | null = null;
 
 function audio(): AudioContext {
   if (!ctx) ctx = new AudioContext({ latencyHint: 'interactive' });
@@ -488,17 +497,25 @@ async function loadTake(input: TakeInput): Promise<void> {
   if (S.phase !== 'idle') return;
   stopPlayback();
   S.phase = 'analyzing';
+  loadingName = input.name;
   el.busy.hidden = false;
   el.empty.hidden = true;
   el.busyBar.style.width = '0%';
+  // The screen shows the incoming take (or the take just recorded) while the analysis runs, not the previous one.
   renderTransport();
+  renderNow();
+  renderInspector();
+  drawRoll();
   try {
     const mode = P.mode;
-    const { frames, stats, engine } =
+    const analysis =
       input.analysis ??
-      (await analyzePitch(input.buffer.getChannelData(0), input.buffer.sampleRate, mode, (p) => {
-        el.busyBar.style.width = `${Math.round(p * 100)}%`;
+      (await analyzePitch(input.buffer.getChannelData(0), input.buffer.sampleRate, mode, {
+        onProgress: (p) => {
+          el.busyBar.style.width = `${Math.round(p * 100)}%`;
+        },
       }));
+    const { frames, stats, engine } = analysis;
     const trans = transcribe(frames, segmentParams(mode, engine));
     let zero = input.timing?.zero ?? 0;
     let bpm = input.timing?.bpm ?? S.bpm;
@@ -525,6 +542,7 @@ async function loadTake(input: TakeInput): Promise<void> {
       zero,
       mode,
       engine,
+      sf0: engine === 'swiftf0' ? analysis : undefined,
       trans,
       stats,
       peaks: envelopeOf(frames),
@@ -557,6 +575,8 @@ async function loadTake(input: TakeInput): Promise<void> {
     toast('解析できませんでした', 'warn');
   } finally {
     S.phase = 'idle';
+    loadingName = null;
+    recorded = null;
     el.busy.hidden = true;
   }
   refresh();
@@ -605,7 +625,9 @@ async function loadFile(file: File): Promise<void> {
 async function reanalyze(): Promise<void> {
   const t = S.take;
   if (!t || S.phase !== 'idle' || t.mode === P.mode) return;
-  await loadTake({ name: t.name, source: t.source, buffer: t.buffer, timing: { zero: t.zero, bpm: S.bpm }, carried: carryOver(t) });
+  // Singing <-> humming keeps SwiftF0's frames; only a switch to or from whistling needs a new analysis.
+  const analysis = engineFor(P.mode) === 'swiftf0' ? t.sf0 : undefined;
+  await loadTake({ name: t.name, source: t.source, buffer: t.buffer, timing: { zero: t.zero, bpm: S.bpm }, analysis, carried: carryOver(t) });
 }
 
 // ---------------------------------------------------------------- recording
@@ -900,6 +922,9 @@ async function stopRecording(): Promise<void> {
   // gives the frames an offline pass would; otherwise the take is analyzed by its engine now.
   const live = engineFor(r.mode) === 'yin';
   const frames = live ? r.frames.concat(r.live.finish()) : [];
+  // Until the take is analyzed, the roll keeps showing what was just recorded (and nothing of the previous take).
+  recorded = r;
+  S.selected = null;
   await loadTake({
     name: stampName(),
     source: 'mic',
@@ -1011,7 +1036,7 @@ function refresh(): void {
 
 function renderTransport(): void {
   const recording = isRecording();
-  el.title.textContent = recording ? 'REC' : (S.take?.name ?? '');
+  el.title.textContent = recording ? 'REC' : (loadingName ?? S.take?.name ?? '');
   el.btnRec.hidden = !S.mic;
   el.btnRec.classList.toggle('on', S.phase === 'rec');
   el.btnRec.classList.toggle('count', S.phase === 'count' || S.phase === 'arming');
@@ -1242,14 +1267,16 @@ function rollData() {
 }
 
 function drawRoll(): void {
-  const r = rec; // set exactly while counting in or recording
+  // rec is set exactly while counting in or recording; recorded while a take just recorded is being analyzed.
+  const r = rec ?? recorded;
   let view: Omit<RollView, 'playhead' | 'selectedId' | 'keyLabel' | 'beatsPerBar' | 'grid'>;
   if (r) {
     view = {
       notes: r.rollNotes,
       curve: { beats: r.curveBeats.view(), pitch: r.curvePitch.view() },
       envelope: { start: r.envStart, step: HOP_SEC / r.spb, peaks: r.peaks.view() },
-      totalBeats: Math.max(16, Math.ceil(((S.playheadBeat ?? 0) + 6) / BEATS_PER_BAR) * BEATS_PER_BAR),
+      // After stop (analyzing) there is no playhead: keep the length the recording reached.
+      totalBeats: Math.max(16, Math.ceil(((S.playheadBeat ?? r.rollNotes.at(-1)?.endBeat ?? 0) + 6) / BEATS_PER_BAR) * BEATS_PER_BAR),
       range: r.range,
       lit: r.pitch != null && S.phase === 'rec' ? { pitch: r.pitch, kind: 'voice' } : null,
       appearAt: null,

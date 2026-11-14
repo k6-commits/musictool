@@ -4,9 +4,9 @@
 // [--engine yin,swiftf0] [--conditions clean,cafeteria10,...] [--make-noisy] [--items] [--json <file>]
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { analyzePitch, SwiftF0Tracker, type InputMode, type PitchFrame } from '../src/dsp/pitch';
+import { analyzePitch, type AnalyzeOptions, type PitchEngine, type PitchFrame } from '../src/dsp/pitch';
 import { hzToMidi, midiToHz } from '../src/music/notes';
-import { SEGMENT_PARAMS, transcribe, type SegmentParams } from '../src/transcribe/segment';
+import { segmentParams, transcribe } from '../src/transcribe/segment';
 import { allItems, type Item } from './real/datasets';
 import { frameScores, octaveErrors, prf, sequenceF1, type FrameScores, type TimedNote } from './real/metrics';
 import { conditionWav, parseCondition, type Condition } from './real/noise';
@@ -14,7 +14,8 @@ import { readWav, type Audio } from './real/wav';
 
 interface Engine {
   name: string;
-  params(mode: InputMode): SegmentParams;
+  /** The engine whose segmentation parameters apply. */
+  kind: PitchEngine;
   run(item: Item, audio: Audio, condition: Condition): Promise<{ frames: PitchFrame[]; msPerFrame: number } | null>;
 }
 
@@ -28,40 +29,28 @@ const wanted = arg('engine', 'yin,swiftf0').split(',');
 const verbose = args.includes('--items');
 const conditions = arg('conditions', 'clean').split(',').map(parseCondition);
 
+/** The app's analysis (analyzePitch) with the given options. */
+function viaApp(name: string, kind: PitchEngine, opts: AnalyzeOptions = {}): Engine {
+  return {
+    name,
+    kind,
+    async run(item, audio) {
+      const { frames, stats } = await analyzePitch(audio.samples, audio.sampleRate, item.mode, { ...opts, engine: kind });
+      return { frames, msPerFrame: stats.millisPerFrame };
+    },
+  };
+}
+
 const ENGINES: Engine[] = [
+  viaApp('yin', 'yin'),
+  viaApp('swiftf0', 'swiftf0'),
+  // SwiftF0 without the app's octave check, for comparison.
+  viaApp('swiftf0-plain', 'swiftf0', { octaveCheck: false }),
   {
-    name: 'yin',
-    params: (mode) => SEGMENT_PARAMS[mode],
-    async run(item, audio) {
-      const { frames, stats } = await analyzePitch(audio.samples, audio.sampleRate, item.mode, undefined, 'yin');
-      return { frames, msPerFrame: stats.millisPerFrame };
-    },
-  },
-  {
-    name: 'swiftf0',
-    params: (mode) => ({ ...SEGMENT_PARAMS[mode], confThreshold: 0.5 }),
-    async run(item, audio) {
-      const { frames, stats } = await analyzePitch(audio.samples, audio.sampleRate, item.mode, undefined, 'swiftf0');
-      return { frames, msPerFrame: stats.millisPerFrame };
-    },
-  },
-  {
-    // SwiftF0 alone, without the YIN octave check the app adds (for comparison).
-    name: 'swiftf0-plain',
-    params: (mode) => ({ ...SEGMENT_PARAMS[mode], confThreshold: 0.5 }),
-    async run(item, audio) {
-      const t = new SwiftF0Tracker(audio.sampleRate, item.mode, false);
-      const t0 = performance.now();
-      const frames: PitchFrame[] = [];
-      for (let p = 0; p < audio.samples.length; p += 8192) frames.push(...t.push(audio.samples.subarray(p, p + 8192)));
-      frames.push(...t.finish());
-      return { frames, msPerFrame: (performance.now() - t0) / Math.max(1, frames.length) };
-    },
-  },
-  {
-    // Frames written by the reference implementation (the swift-f0 Python package): eval/real/swiftf0_frames.py.
+    // Frames written by the reference implementation (the swift-f0 Python package, at the recording's own level):
+    // eval/real/swiftf0_frames.py.
     name: 'swiftf0-ref',
-    params: (mode) => ({ ...SEGMENT_PARAMS[mode], confThreshold: 0.5 }),
+    kind: 'swiftf0',
     async run(item, _audio, condition) {
       const path = join(root, 'frames/swiftf0', condition.name, item.dataset, `${item.id}.json`);
       if (!existsSync(path)) return null;
@@ -90,32 +79,33 @@ interface Row {
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
 
+/** Notes from one engine's analysis, with absolute pitch (the segmentation removes the singer's tuning offset). */
+async function notesOf(item: Item, audio: Audio, kind: PitchEngine): Promise<TimedNote[]> {
+  const { frames } = await analyzePitch(audio.samples, audio.sampleRate, item.mode, { engine: kind });
+  const t = transcribe(frames, segmentParams(item.mode, kind));
+  return t.notes.map((n) => ({ start: n.start, end: n.end, hz: midiToHz(n.pitch + t.tuningCents / 100) }));
+}
+
 /**
- * A score-based reference fitted to one recording: the start offset (0-0.6 s, the person following the
- * playback late) that lines up the most onsets regardless of pitch, then the octave (people hum low melodies an
- * octave down) that matches the most notes. Both are fitted for each engine in the same way.
+ * A score-based reference (HumTrans) fitted to its recording, once, for every engine and condition alike: the start
+ * offset (0-2 s; people following the playback lag it by up to 1.5 s) and octave (people hum low melodies one or two
+ * octaves down) that together match the most notes (onset and pitch). The matches are summed over YIN's and
+ * SwiftF0's notes on the clean recording, so neither engine is favoured. (Fitting the offset on onsets alone first
+ * misplaces recordings with a very regular rhythm.)
  */
-function fitScore(ref: TimedNote[], est: TimedNote[]): TimedNote[] {
-  const shift = (off: number, octave: number) => ref.map((n) => ({ start: n.start + off, end: n.end + off, hz: n.hz * Math.pow(2, octave) }));
-  let bestOff = 0;
-  let bestCount = -1;
-  for (let k = 0; k <= 60; k++) {
-    const c = prf(shift(k / 100, 0), est, { pitchTolCents: null }).matched;
-    if (c > bestCount) {
-      bestCount = c;
-      bestOff = k / 100;
+async function fitScore(item: Item): Promise<{ notes: TimedNote[]; offset: number; octave: number }> {
+  const audio = readWav(readFileSync(item.wav));
+  const est = [await notesOf(item, audio, 'yin'), await notesOf(item, audio, 'swiftf0')];
+  const shift = (off: number, octave: number) => item.notes.map((n) => ({ start: n.start + off, end: n.end + off, hz: n.hz * Math.pow(2, octave) }));
+  let best = { offset: 0, octave: 0, count: -1 };
+  for (const octave of [0, -1, 1, -2, 2]) {
+    for (let k = 0; k <= 200; k++) {
+      const ref = shift(k / 100, octave);
+      const count = est.reduce((a, e) => a + prf(ref, e).matched, 0);
+      if (count > best.count) best = { offset: k / 100, octave, count };
     }
   }
-  let bestOct = 0;
-  bestCount = -1;
-  for (const octave of [0, -1, 1]) {
-    const c = prf(shift(bestOff, octave), est).matched;
-    if (c > bestCount) {
-      bestCount = c;
-      bestOct = octave;
-    }
-  }
-  return shift(bestOff, bestOct);
+  return { notes: shift(best.offset, best.octave), offset: best.offset, octave: best.octave };
 }
 
 async function main(): Promise<void> {
@@ -130,6 +120,13 @@ async function main(): Promise<void> {
     return;
   }
   const engines = ENGINES.filter((e) => wanted.includes(e.name));
+  // Score-based references are lined up with their recordings first (the same fit for every engine and condition).
+  const fits: Record<string, { offset: number; octave: number }> = {};
+  for (const item of items.filter((i) => i.score)) {
+    const f = await fitScore(item);
+    item.notes = f.notes;
+    fits[`${item.dataset}/${item.id}`] = { offset: f.offset, octave: f.octave };
+  }
   const perItem: Record<string, unknown>[] = [];
   const acc = new Map<string, { item: Item; conp: number; conpoff: number; con: number; octave: number; seq: number; est: number; frame: FrameScores | null; ms: number }[]>();
   const agreement = new Map<string, number[]>();
@@ -143,11 +140,11 @@ async function main(): Promise<void> {
     for (const engine of engines) {
       const out = await engine.run(item, audio, condition);
       if (!out) continue;
-      const params = engine.params(item.mode);
+      const params = segmentParams(item.mode, engine.kind);
       const t = transcribe(out.frames, params);
       // Absolute pitch: the segmentation reports pitches with the singer's overall tuning offset removed.
       const est: TimedNote[] = t.notes.map((n) => ({ start: n.start, end: n.end, hz: midiToHz(n.pitch + t.tuningCents / 100) }));
-      const ref = item.score ? fitScore(item.notes, est) : item.notes;
+      const ref = item.notes;
       const conp = prf(ref, est).f1;
       const conpoff = prf(ref, est, { offsetRatio: 0.2 }).f1;
       const con = prf(ref, est, { pitchTolCents: null }).f1;
@@ -202,7 +199,7 @@ async function main(): Promise<void> {
   for (const [dataset, f1s] of agreement) console.log(`${dataset.padEnd(10)} annotator 2 vs annotator 1: COnP ${pct(mean(f1s))}`);
   const out = arg('json', join(process.cwd(), 'e2e/out/eval-real.json'));
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, JSON.stringify({ rows, agreement: Object.fromEntries([...agreement].map(([k, v]) => [k, mean(v)])), items: perItem }, null, 1));
+  writeFileSync(out, JSON.stringify({ rows, agreement: Object.fromEntries([...agreement].map(([k, v]) => [k, mean(v)])), fits, items: perItem }, null, 1));
   console.log(`\nDetails: ${out}`);
 }
 
