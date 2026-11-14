@@ -9,12 +9,17 @@
     "build": "node scripts/build.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p .",
-    "eval": "node scripts/eval.mjs",
-    "e2e": "node scripts/build.mjs && node e2e/run.mjs"
+    "eval": "node scripts/run-ts.mjs eval/eval.ts",
+    "e2e": "node scripts/build.mjs && node e2e/run.mjs",
+    "eval:real": "node scripts/run-ts.mjs eval/real.ts",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "eval:fetch": "node scripts/fetch-eval-data.mjs",
+    "eval:check-swiftf0": "node scripts/run-ts.mjs eval/real/check-swiftf0.ts"
   },
   "devDependencies": {
     "@tonejs/midi": "2.0.28",
     "@types/node": "22.20.5",
+    "assemblyscript": "0.28.20",
     "esbuild": "0.28.2",
     "typescript": "7.0.2",
     "vite": "8.3.5",

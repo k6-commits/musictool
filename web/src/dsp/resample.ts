@@ -102,14 +102,54 @@ export class Resampler {
   }
 }
 
+/**
+ * A Resampler whose output lines up with its input: the filter delay is dropped at the start, and once finish()
+ * is called the output has exactly outputLength(input) samples (the filter's tail, then zeros if needed).
+ */
+export class AlignedResampler {
+  private readonly r: Resampler;
+  private skipped = 0;
+  private written = 0;
+  private input = 0;
+
+  constructor(fromRate: number, toRate: number) {
+    this.r = new Resampler(fromRate, toRate);
+  }
+
+  push(x: Float32Array): Float32Array {
+    this.input += x.length;
+    return this.take(this.r.process(x), Infinity);
+  }
+
+  finish(): Float32Array {
+    const want = this.r.outputLength(this.input);
+    const tail = this.take(this.r.process(new Float32Array(this.r.flushLength)), want);
+    const out = new Float32Array(tail.length + Math.max(0, want - this.written));
+    out.set(tail);
+    this.written = want;
+    return out;
+  }
+
+  private take(y: Float32Array, limit: number): Float32Array {
+    let from = 0;
+    if (this.skipped < this.r.skip) {
+      from = Math.min(this.r.skip - this.skipped, y.length);
+      this.skipped += from;
+    }
+    const to = Math.max(from, Math.min(y.length, from + Math.max(0, limit - this.written)));
+    this.written += to - from;
+    return y.subarray(from, to);
+  }
+}
+
 /** Offline conversion of a whole buffer, compensating the filter delay. */
 export function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
   if (fromRate === toRate) return input.slice();
-  const r = new Resampler(fromRate, toRate);
-  const head = r.process(input);
-  const tail = r.process(new Float32Array(r.flushLength));
+  const r = new AlignedResampler(fromRate, toRate);
+  const head = r.push(input);
+  const tail = r.finish();
   const all = new Float32Array(head.length + tail.length);
   all.set(head);
   all.set(tail, head.length);
-  return all.slice(r.skip, r.skip + r.outputLength(input.length));
+  return all;
 }
