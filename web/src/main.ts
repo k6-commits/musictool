@@ -1,5 +1,5 @@
 // musictool prototype: sing (or open a recording) -> pitch -> notes -> edit -> MIDI.
-import { asFiles, buildFiles, canShareFiles, exportNames, packageFiles, safeName, saveWithLink, type ExportKind, type OutFile } from './app/files';
+import { asFiles, buildFiles, canShareFiles, packageFiles, safeName, saveWithLink, shareRefusesMidi, type ExportKind, type OutFile } from './app/files';
 import { MicCapture, TakeRecorder } from './audio/capture';
 import { measureLatency, reportedLatency } from './audio/latency';
 import { INSTRUMENTS, Player, type Instrument } from './audio/player';
@@ -116,9 +116,20 @@ interface Prefs {
   mode: InputMode;
   countIn: boolean;
   metronome: boolean;
+  /** Latency correction in ms, added to what the browser reports: set by hand or by 測る. */
   latencyMs: number;
+  /** The last loopback measurement: round trip (ms), the microphone it used, chirps heard / recorded, spread (ms). */
+  measured: Measurement | null;
   instrument: Instrument;
   balance: number;
+}
+
+interface Measurement {
+  ms: number;
+  mic: string;
+  heard: number;
+  covered: number;
+  spreadMs: number;
 }
 
 const PREFS_KEY = 'musictool.prefs.v1';
@@ -133,6 +144,7 @@ const defaultPrefs: Prefs = {
   countIn: true,
   metronome: true,
   latencyMs: 0,
+  measured: null,
   instrument: 'piano',
   balance: 0.5,
 };
@@ -148,12 +160,20 @@ function loadPrefs(): Prefs {
     if (typeof raw.countIn === 'boolean') p.countIn = raw.countIn;
     if (typeof raw.metronome === 'boolean') p.metronome = raw.metronome;
     if (typeof raw.latencyMs === 'number' && Number.isFinite(raw.latencyMs)) p.latencyMs = clampLatency(raw.latencyMs);
+    p.measured = readMeasurement(raw.measured);
     if (INSTRUMENTS.some((i) => i.id === raw.instrument)) p.instrument = raw.instrument as Instrument;
     if (typeof raw.balance === 'number' && Number.isFinite(raw.balance)) p.balance = Math.max(0, Math.min(1, raw.balance));
   } catch {
     /* storage unavailable or not JSON */
   }
   return p;
+}
+
+function readMeasurement(raw: unknown): Measurement | null {
+  const m = raw as Partial<Measurement> | null;
+  const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+  if (!m || typeof m !== 'object' || !num(m.ms) || !num(m.heard) || !num(m.covered) || !num(m.spreadMs) || typeof m.mic !== 'string') return null;
+  return { ms: m.ms!, mic: m.mic, heard: m.heard!, covered: m.covered!, spreadMs: m.spreadMs! };
 }
 
 function savePrefs(): void {
@@ -190,12 +210,12 @@ const S = {
   undoAt: 0,
   exportKind: 'both' as ExportKind,
   mic: micAllowed(),
-  /** The last microphone used, for the measurement panel (device latency, without the manual correction). */
+  /** The last microphone used, for the measurement panel (the latency the browser reports, before the correction). */
   lastInput: null as { kind: string; deviceLatencyMs: number } | null,
-  /** This session's loopback measurement (round trip; chirps heard of those recorded; spread of their delays). */
-  measured: null as { ms: number; heard: number; covered: number; spreadMs: number } | null,
-  /** The line under the latency correction: the measurement's progress or result. */
+  /** The line under the latency correction: the last measurement's outcome in this session. */
   latencyNote: null as { text: string; tone: '' | 'ok' | 'warn' } | null,
+  /** Shown once per session: the hint to measure, and the note that the microphone differs from the measured one. */
+  hinted: new Set<string>(),
 };
 
 let ctx: AudioContext | null = null;
@@ -707,6 +727,37 @@ function noteInput(capture: MicCapture, deviceLatency: number): void {
   S.lastInput = { kind: capture.kind === 'worklet' ? 'Worklet' : 'ScriptProcessor', deviceLatencyMs: Math.round(deviceLatency * 1000) };
 }
 
+/** Resume the audio clock (inside the user's gesture) and open the microphone; null, after a message, if it fails. */
+async function openMic(ac: AudioContext): Promise<MicCapture | null> {
+  try {
+    await ac.resume();
+    return await MicCapture.open(ac);
+  } catch (e) {
+    micFailed(e);
+    return null;
+  }
+}
+
+/** A hint shown at most once per session. */
+function hintOnce(key: string, text: string): void {
+  if (S.hinted.has(key)) return;
+  S.hinted.add(key);
+  toast(text, 'warn');
+}
+
+/**
+ * The correction is measured through the speaker and one microphone. Say so when a take starts without a
+ * measurement on a phone (where browsers report the least), or with another microphone (earphones with a mic).
+ */
+function latencyHints(capture: MicCapture): void {
+  const m = P.measured;
+  if (!m) {
+    if (matchMedia('(pointer: coarse)').matches) hintOnce('measure', '設定の「測る」で遅れを合わせると、拍にそろいます');
+  } else if (m.mic && capture.label && capture.label !== m.mic) {
+    hintOnce(`mic:${capture.label}`, '遅れを測ったときと別のマイクです。ずれるときは補正で合わせてください');
+  }
+}
+
 async function startRecording(): Promise<void> {
   if (S.phase !== 'idle' || !S.mic) return;
   stopPlayback();
@@ -716,30 +767,28 @@ async function startRecording(): Promise<void> {
   renderInspector();
   const token = ++armToken;
   const ac = audio();
-  let capture: MicCapture;
-  try {
-    await ac.resume();
-    capture = await MicCapture.open(ac);
-  } catch (e) {
-    if (token !== armToken) return;
+  const capture = await openMic(ac);
+  // REC pressed again (cancel) while the microphone was opening.
+  if (token !== armToken || S.phase !== 'arming') {
+    capture?.close();
+    return;
+  }
+  if (!capture) {
     S.phase = 'idle';
-    micFailed(e);
     renderTransport();
     renderInspector();
     return;
   }
-  // REC pressed again (cancel) while the microphone was opening.
-  if (token !== armToken || S.phase !== 'arming') {
-    capture.close();
-    return;
-  }
   getPlayer();
   const spb = 60 / S.bpm;
-  const t0 = ac.currentTime + 0.15;
-  const countBeats = P.countIn ? BEATS_PER_BAR : 0;
+  // The take's latency is read once, here, and used for the live view and the analyzed take alike.
   const deviceLatency = reportedLatency(ac, capture);
   const latency = deviceLatency + P.latencyMs / 1000;
   noteInput(capture, deviceLatency);
+  latencyHints(capture);
+  // The pre-roll also covers a negative total latency, so bar 1 never falls before the recording's first sample.
+  const t0 = ac.currentTime + 0.15 + Math.max(0, -latency);
+  const countBeats = P.countIn ? BEATS_PER_BAR : 0;
   const r: Rec = {
     capture,
     recorder: new TakeRecorder(),
@@ -916,10 +965,6 @@ async function stopRecording(): Promise<void> {
   rec = null;
   window.clearInterval(r.clickTimer);
   cancelClicks(r, -Infinity);
-  // The browser's estimate again, now that audio has run for the whole take (some report 0 at first).
-  const deviceLatency = reportedLatency(audio(), r.capture);
-  r.latency = deviceLatency + P.latencyMs / 1000;
-  noteInput(r.capture, deviceLatency);
   r.capture.close();
   el.count.hidden = true;
   // Decided by the clock, not the phase: in a background tab the phase may not have caught up yet.
@@ -958,50 +1003,73 @@ function isRecording(): boolean {
 
 // ---------------------------------------------------------------- latency measurement
 
+/** The measurement in progress; pressing 測る again (then labeled やめる) cancels it. */
+let measuring: AbortController | null = null;
+
 /**
  * Measure the round trip through the speaker and the microphone (src/audio/latency.ts). What the browser does not
  * report becomes the correction, so a later change it does report (another output device) still counts.
  */
 async function measureDelay(): Promise<void> {
-  if (S.phase !== 'idle' || !S.mic) return;
-  stopPlayback();
-  S.phase = 'measuring';
-  S.latencyNote = { text: 'スピーカーの音で測っています…', tone: '' };
-  renderTransport();
-  renderSettings();
-  const ac = audio();
-  let capture: MicCapture;
-  try {
-    await ac.resume();
-    capture = await MicCapture.open(ac);
-  } catch (e) {
-    S.phase = 'idle';
-    S.latencyNote = null;
-    micFailed(e);
-    renderTransport();
-    renderSettings();
+  if (measuring) {
+    endMeasurement(measuring, null);
     return;
   }
+  if (S.phase !== 'idle' || !S.mic) return;
+  stopPlayback();
+  const run = new AbortController();
+  measuring = run;
+  S.phase = 'measuring';
+  renderAfterMeasurement();
+  const ac = audio();
+  const capture = await openMic(ac);
+  if (!capture || run.signal.aborted) {
+    capture?.close();
+    endMeasurement(run, null);
+    return;
+  }
+  let note: typeof S.latencyNote;
   try {
-    const m = await measureLatency(ac, capture);
+    const m = await measureLatency(ac, capture, run.signal);
     const deviceLatency = reportedLatency(ac, capture);
+    if (run.signal.aborted) return;
     noteInput(capture, deviceLatency);
     if (m.latency === null) {
-      S.latencyNote = { text: '聞き取れませんでした。イヤホンを外し、音量を上げてもう一度どうぞ', tone: 'warn' };
+      note = { text: '聞き取れませんでした。イヤホンを外し、音量を上げてもう一度どうぞ', tone: 'warn' };
     } else {
-      P.latencyMs = clampLatency((m.latency - deviceLatency) * 1000);
+      const ms = Math.round(m.latency * 1000);
+      P.latencyMs = clampLatency(ms - deviceLatency * 1000);
+      P.measured = { ms, mic: capture.label, heard: m.heard, covered: m.covered, spreadMs: m.spread * 1000 };
       savePrefs();
-      S.measured = { ms: Math.round(m.latency * 1000), heard: m.heard, covered: m.covered, spreadMs: m.spread * 1000 };
-      S.latencyNote = { text: `往復 ${S.measured.ms} ms に合わせました`, tone: 'ok' };
+      // The correction stops at the slider's range: say so if that keeps the take from using the measured value.
+      const applied = Math.round(deviceLatency * 1000) + P.latencyMs;
+      note =
+        Math.abs(applied - ms) <= 1
+          ? { text: `往復 ${ms} ms に合わせました`, tone: 'ok' }
+          : { text: `往復 ${ms} ms を測りましたが、補正の範囲を超えるため ${applied} ms にしました`, tone: 'warn' };
     }
   } catch {
-    S.latencyNote = { text: '測れませんでした', tone: 'warn' };
+    note = { text: '測れませんでした', tone: 'warn' };
   } finally {
     capture.close();
-    S.phase = 'idle';
   }
-  if (el.settings.hidden) toast(S.latencyNote.text, S.latencyNote.tone);
+  if (el.settings.hidden) toast(note.text, note.tone);
+  endMeasurement(run, note);
+}
+
+/** Back to idle with `note` under the correction, unless another measurement has taken over since. */
+function endMeasurement(run: AbortController, note: typeof S.latencyNote): void {
+  if (measuring !== run) return;
+  run.abort();
+  measuring = null;
+  S.phase = 'idle';
+  S.latencyNote = note;
+  renderAfterMeasurement();
+}
+
+function renderAfterMeasurement(): void {
   renderTransport();
+  renderInspector();
   renderSettings();
 }
 
@@ -1503,12 +1571,16 @@ function renderSettings(): void {
     }
   }
   el.btnSample.disabled = !idle;
+  const measuring = S.phase === 'measuring';
   el.latency.value = String(P.latencyMs);
-  el.latency.disabled = S.phase === 'measuring';
+  el.latency.disabled = !idle;
   el.latencyVal.textContent = `${P.latencyMs > 0 ? '+' : ''}${P.latencyMs} ms`;
-  el.btnMeasure.disabled = !idle;
-  el.btnMeasure.textContent = S.phase === 'measuring' ? '測定中' : '測る';
-  const note = S.latencyNote ?? { text: 'イヤホンを外して押すと、スピーカーの音で合わせます', tone: '' };
+  // While measuring the button stays enabled (it cancels), so focus is not lost.
+  el.btnMeasure.disabled = !idle && !measuring;
+  el.btnMeasure.textContent = measuring ? 'やめる' : '測る';
+  const note = measuring
+    ? { text: 'スピーカーの音で測っています…', tone: '' }
+    : (S.latencyNote ?? { text: 'イヤホンを外して押すと、スピーカーの音で合わせます', tone: '' });
   el.latencyNote.textContent = note.text;
   el.latencyNote.className = `note ${note.tone}`;
   renderMeasure();
@@ -1533,8 +1605,8 @@ function renderMeasure(): void {
     // What a take subtracts: the browser's own estimate plus the correction.
     rows.push(['遅れ', `${S.lastInput.deviceLatencyMs + P.latencyMs} ms（申告 ${S.lastInput.deviceLatencyMs} ＋ 補正 ${P.latencyMs}）`]);
   }
-  if (S.measured) {
-    const m = S.measured;
+  if (P.measured) {
+    const m = P.measured;
     rows.push(['実測', `${m.ms} ms（${m.heard}/${m.covered} 回、ばらつき ${m.spreadMs.toFixed(1)} ms）`]);
   }
   el.measure.innerHTML = '';
@@ -1560,7 +1632,8 @@ function renderExport(zipOnly: boolean): void {
   el.exportNote.textContent = zipOnly ? 'ZIP にまとめて保存。展開して DAW へ' : '';
   // Phones and tablets: the share sheet sends the files on (AirDrop to the computer with the DAW, a cloud drive)
   // without a trip through the downloads folder. Each file goes as it is, without a zip.
-  el.btnShare.hidden = zipOnly || !matchMedia('(pointer: coarse)').matches || !canShareFiles(exportNames(S.exportKind, 'x'));
+  el.btnShare.hidden =
+    zipOnly || !matchMedia('(pointer: coarse)').matches || !canShareFiles() || (S.exportKind !== 'wav' && shareRefusesMidi());
 }
 
 function openExport(): void {
@@ -1595,18 +1668,26 @@ function exportFiles(): { name: string; files: OutFile[] } | null {
   return { name, files };
 }
 
+/** Save the files through a download link (one file, or a zip of several); returns the saved name. */
+function download(name: string, files: OutFile[]): string {
+  const out = packageFiles(files, name, false);
+  lastExport = { filename: out.name, files: files.map((f) => ({ name: f.name, size: f.data.length })) };
+  saveWithLink(out);
+  closeSheet();
+  toast(`${out.name} を書き出しました`, 'ok');
+  return out.name;
+}
+
 async function doExport(): Promise<void> {
   const built = exportFiles();
   if (!built) return;
   const { name, files } = built;
-  const out = packageFiles(files, name, savesThroughHost);
-  lastExport = { filename: out.name, files: files.map((f) => ({ name: f.name, size: f.data.length })) };
   if (!savesThroughHost) {
-    saveWithLink(out);
-    closeSheet();
-    toast(`${out.name} を書き出しました`, 'ok');
+    download(name, files);
     return;
   }
+  const out = packageFiles(files, name, true);
+  lastExport = { filename: out.name, files: files.map((f) => ({ name: f.name, size: f.data.length })) };
   // The viewer's frame cannot download by itself: without the host's save, there is no way to save here.
   const dl = await downloadsApi;
   if (!dl) {
@@ -1630,12 +1711,14 @@ async function doExport(): Promise<void> {
 async function doShare(): Promise<void> {
   const built = exportFiles();
   if (!built) return;
-  lastExport = { filename: '', files: built.files.map((f) => ({ name: f.name, size: f.data.length })) };
   try {
     await navigator.share({ files: asFiles(built.files) });
     closeSheet();
   } catch (e) {
-    if ((e as { name?: string })?.name !== 'AbortError') toast('共有できませんでした', 'warn');
+    if ((e as { name?: string })?.name === 'AbortError') return;
+    // Refused: a type or a size (over 50 MB on Android) the share sheet does not take. Save the files instead.
+    const saved = download(built.name, built.files);
+    toast(`共有できないので ${saved} をダウンロードしました`, 'warn');
   }
 }
 
@@ -1742,7 +1825,18 @@ el.latency.min = String(LATENCY_MIN);
 el.latency.max = String(LATENCY_MAX);
 el.latency.addEventListener('input', () => {
   P.latencyMs = clampLatency(Number(el.latency.value));
+  // The last measurement's note no longer describes the correction in use.
+  S.latencyNote = null;
   savePrefs();
+  renderSettings();
+});
+// Another tab saved preferences (a measurement there, say): take its latency settings, so that saving here later
+// does not write the old ones back.
+window.addEventListener('storage', (e) => {
+  if (e.key !== PREFS_KEY) return;
+  const stored = loadPrefs();
+  P.latencyMs = stored.latencyMs;
+  P.measured = stored.measured;
   renderSettings();
 });
 el.btnMeasure.addEventListener('click', () => void measureDelay());
@@ -1927,7 +2021,7 @@ function trapFocus(e: KeyboardEvent, root: HTMLElement): void {
   get latencyMs() {
     return P.latencyMs;
   },
-  measured: () => S.measured,
+  measured: () => P.measured,
   lastExport: () => lastExport,
   select: (index: number) => select(S.notes[index]?.id ?? null),
 };

@@ -1,17 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { estimateLatency, LAG_MAX, PROBE_TIMES, probeSignal, reportedLatency } from '../src/audio/latency';
 import type { MicCapture } from '../src/audio/capture';
-import { sing } from '../src/synth/voice';
+import { rng, sing } from '../src/synth/voice';
 
-/** Deterministic Gaussian noise (xorshift + Box-Muller). */
+/** Deterministic Gaussian noise (Box-Muller on the synth's xorshift, mapped to (0, 1]). */
 function gauss(seed: number): () => number {
-  let s = seed >>> 0 || 1;
-  const uniform = () => {
-    s ^= s << 13;
-    s ^= s >>> 17;
-    s ^= s << 5;
-    return ((s >>> 0) + 0.5) / 4294967296;
-  };
+  const r = rng(seed);
+  const uniform = () => (r() + 1) / 2;
   return () => Math.sqrt(-2 * Math.log(uniform())) * Math.cos(2 * Math.PI * uniform());
 }
 
@@ -129,6 +124,25 @@ describe('loopback latency', () => {
     expect(run({ sampleRate: 48000, delay: 2000, silent: [0, 2, 4, 6] }).latency).toBeNull();
     const loud = run({ sampleRate: 48000, delay: 2000, gain: 4, clip: true });
     expect(Math.abs(loud.latency! * 48000 - 2000)).toBeLessThanOrEqual(2);
+  });
+
+  it('never hears chirps in digital silence', () => {
+    const r = record({ sampleRate: 48000, delay: 2000 });
+    const n = r.recording.length;
+    // A muted microphone: exact zeros throughout.
+    expect(estimateLatency(new Float32Array(n), r.firstFrame, 48000, r.emitted).latency).toBeNull();
+    // Zeros, then noise: no chirps at all.
+    const noise = gauss(3);
+    const lateNoise = new Float32Array(n).map((_, i) => (i > 4.2 * 48000 ? 0.01 * noise() : 0));
+    expect(estimateLatency(lateNoise, r.firstFrame, 48000, r.emitted).latency).toBeNull();
+    // Gated noise: 60 ms bursts with digital silence between.
+    const gated = new Float32Array(n).map((_, i) => (i % 14400 < 2880 ? 0.02 * noise() : 0));
+    expect(estimateLatency(gated, r.firstFrame, 48000, r.emitted).latency).toBeNull();
+    // A digital loopback (exact zeros between the chirps) and a faint chirp over silence are still found.
+    for (const gain of [1, 0.001]) {
+      const clean = run({ sampleRate: 48000, delay: 2000, gain, noise: 0 });
+      expect(Math.abs(clean.latency! * 48000 - 2000), `gain ${gain}`).toBeLessThanOrEqual(2);
+    }
   });
 
   it('needs the recording to cover most chirps', () => {

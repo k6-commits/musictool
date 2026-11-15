@@ -33,7 +33,8 @@ export interface SingOptions {
   seed?: number;
 }
 
-function rng(seed: number): () => number {
+/** Deterministic xorshift32 noise in (-1, 1]. */
+export function rng(seed: number): () => number {
   let s = seed >>> 0 || 1;
   return () => {
     s ^= s << 13;

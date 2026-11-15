@@ -49,20 +49,12 @@ export function buildMidi(input: ExportInput): Uint8Array {
   });
 }
 
-/** The names of the files an export of this kind writes: the .mid, then the voice. */
-export function exportNames(kind: ExportKind, name: string): string[] {
-  const base = safeName(name);
-  const names: string[] = [];
-  if (kind !== 'wav') names.push(`${base}.mid`);
-  if (kind !== 'midi') names.push(`${base}-voice.wav`);
-  return names;
-}
-
 export function buildFiles(kind: ExportKind, input: ExportInput): OutFile[] {
-  return exportNames(kind, input.name).map((name) => ({
-    name,
-    data: name.endsWith('.mid') ? buildMidi(input) : encodeWav(input.voice, input.sampleRate),
-  }));
+  const base = safeName(input.name);
+  const files: OutFile[] = [];
+  if (kind !== 'wav') files.push({ name: `${base}.mid`, data: buildMidi(input) });
+  if (kind !== 'midi') files.push({ name: `${base}-voice.wav`, data: encodeWav(input.voice, input.sampleRate) });
+  return files;
 }
 
 /** One file to save: the file itself, or a zip when there are several (or when only zip is allowed). */
@@ -90,16 +82,21 @@ export function asFiles(files: OutFile[]): File[] {
 }
 
 /**
- * Can the system share sheet take files with these names? iOS takes any file; Android Chrome only some types
- * (.wav but not .mid or .zip); desktop Linux has no share sheet.
+ * Is there a system share sheet that takes files? canShare() only says whether files can be shared at all: neither
+ * Chromium nor WebKit looks at their type or size there (Android's sheet refuses .mid only when share() is called).
  */
-export function canShareFiles(names: string[]): boolean {
+export function canShareFiles(): boolean {
   if (typeof navigator === 'undefined' || typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false;
   try {
-    return navigator.canShare({ files: names.map((n) => new File([], n, { type: mimeOf(n) })) });
+    return navigator.canShare({ files: asFiles([{ name: 'voice.wav', data: new Uint8Array(0) }]) });
   } catch {
     return false;
   }
+}
+
+/** Android's share sheet (Chrome and the browsers built on it) refuses .mid files; .wav goes through. */
+export function shareRefusesMidi(): boolean {
+  return typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
 }
 
 function mimeOf(name: string): string {

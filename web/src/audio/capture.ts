@@ -1,7 +1,7 @@
 // Microphone capture with raw (unprocessed) audio and context-frame timestamps,
 // so recorded samples can be lined up with the metronome clicks.
-// One MicCapture lives for one take: it is opened when recording starts and closed when it stops,
-// so the browser's microphone indicator is only on while recording.
+// One MicCapture lives for one take or one latency measurement: it is opened when that starts and closed when it
+// ends, so the browser's microphone indicator is only on while the app is listening.
 
 const WORKLET_SOURCE = `
 class MtTap extends AudioWorkletProcessor {
@@ -48,6 +48,8 @@ export class MicCapture {
   readonly sampleRate: number;
   /** Estimated input latency in seconds (0 when the browser does not say). */
   readonly inputLatency: number;
+  /** The device's name as the browser gives it ('' when it does not), to tell microphones apart. */
+  readonly label: string;
   readonly kind: 'worklet' | 'script-processor';
   /** RMS of the latest chunk, for the level meter. */
   level = 0;
@@ -69,6 +71,7 @@ export class MicCapture {
     const track = stream.getAudioTracks()[0];
     const settings = track?.getSettings() as (MediaTrackSettings & { latency?: number }) | undefined;
     this.inputLatency = typeof settings?.latency === 'number' ? settings.latency : 0;
+    this.label = track?.label ?? '';
     track?.addEventListener('ended', () => {
       if (!this.closed) this.onEnded?.();
     });
@@ -87,6 +90,9 @@ export class MicCapture {
         channelCount: 1,
       },
     });
+    // Opening the microphone can pause the audio clock (iOS switches its audio session). Give it a moment to run
+    // again, so the caller does not schedule on a stopped clock; one that stays stopped is the caller's to handle.
+    if (ctx.state !== 'running') await Promise.race([ctx.resume().catch(() => {}), new Promise((resolve) => setTimeout(resolve, 2000))]);
     const source = ctx.createMediaStreamSource(stream);
     const mute = ctx.createGain();
     mute.gain.value = 0;

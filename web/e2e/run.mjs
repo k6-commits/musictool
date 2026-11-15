@@ -3,7 +3,8 @@
 //  - audio files: upload, drop anywhere, a 5-minute take
 //  - editing, playback, shortcuts, settings, the claude.ai artifact mode, a phone layout
 //  - the ScriptProcessor fallback and a stereo input with the voice on one channel
-//  - the latency measurement, through a loopback microphone and through one that does not hear the speakers
+//  - the latency measurement: through a loopback microphone (then a take whose clicks must land on the beats),
+//    through one that does not hear the speakers, and stopped halfway; the share sheet on iPhone and Android
 //  - the synth envelope and lazy note scheduling (OfflineAudioContext)
 // Needs Playwright with Chromium: `npm i -D playwright && npx playwright install chromium`.
 import { build } from 'esbuild';
@@ -15,8 +16,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const require = createRequire(import.meta.url);
 let chromium;
+let devices;
 try {
-  ({ chromium } = require('playwright'));
+  ({ chromium, devices } = require('playwright'));
 } catch {
   console.error('Playwright is not installed. Run: npm i -D playwright && npx playwright install chromium');
   process.exit(2);
@@ -84,11 +86,12 @@ const trackMic = () => {
 };
 const liveTracks = (page) => page.evaluate(() => window.__tracks.filter((t) => t.readyState === 'live').length);
 
-// A share sheet that takes any file (as on iOS), or only .wav once __shareMidi is false (as Android Chrome);
-// it records what it was given.
+// A share sheet whose canShare() says yes to any files, as real ones do (they check types and sizes only in share());
+// it records what it was given, or refuses everything once __shareFails is set.
 const shareSheet = () => {
-  navigator.canShare = (data) => (data.files ?? []).every((f) => f.name.endsWith('.wav') || window.__shareMidi !== false);
+  navigator.canShare = (data) => Array.isArray(data?.files) && data.files.length > 0;
   navigator.share = async (data) => {
+    if (window.__shareFails) throw new DOMException('Permission denied', 'NotAllowedError');
     window.__shared = data.files.map((f) => ({ name: f.name, size: f.size, type: f.type }));
   };
 };
@@ -113,7 +116,27 @@ const loopbackMic = () => {
     if (tap && target === tap.ctx.destination) connect.call(this, tap.line);
     return result;
   };
-  navigator.mediaDevices.getUserMedia = async () => new MediaStream(tap.out.stream.getAudioTracks().map((t) => t.clone()));
+  navigator.mediaDevices.getUserMedia = async () => {
+    const stream = new MediaStream(tap.out.stream.getAudioTracks().map((t) => t.clone()));
+    window.__tracks.push(...stream.getTracks());
+    return stream;
+  };
+};
+
+// The samples of a 16-bit mono WAV as written by the app (44-byte header).
+const readWav = (buf) => {
+  const x = new Float32Array((buf.length - 44) / 2);
+  for (let i = 0; i < x.length; i++) x[i] = buf.readInt16LE(44 + 2 * i) / 32768;
+  return { sr: buf.readUInt32LE(24), x };
+};
+// Where the click near `t` (seconds) starts: the first sample at 20 % of its peak.
+const clickOnset = ({ sr, x }, t) => {
+  const from = Math.max(0, Math.round((t - 0.03) * sr));
+  const to = Math.min(x.length, Math.round((t + 0.08) * sr));
+  let peak = 0;
+  for (let i = from; i < to; i++) peak = Math.max(peak, Math.abs(x[i]));
+  for (let i = from; i < to; i++) if (Math.abs(x[i]) >= 0.2 * peak) return i / sr;
+  return NaN;
 };
 
 async function newApp(browser, options = {}, initScript = null) {
@@ -273,7 +296,7 @@ try {
   // ---- export MIDI + voice (zip)
   await page.click('#btn-export');
   await page.click('.tile[data-kind="both"]');
-  check('no share button on a computer', await page.isHidden('#btn-share'));
+  check('no share button without a share sheet', await page.isHidden('#btn-share'));
   const [zipDl] = await Promise.all([page.waitForEvent('download'), page.click('#btn-download')]);
   await zipDl.saveAs(join(out, zipDl.suggestedFilename()));
   const exp = await page.evaluate(() => window.__mt.lastExport());
@@ -448,24 +471,29 @@ try {
   check('no page errors (phone)', phone.page.errors.length === 0, phone.page.errors.join(' | '));
   await phone.context.close();
 
-  // ---- phone: the share sheet gets the .mid and the voice as separate files (a fresh page: the touch events
-  // sent through CDP above leave the emulated phone without its coarse pointer)
-  const sharer = await newApp(browser, { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }, shareSheet);
-  await sharer.page.click('#btn-export');
-  await sharer.page.click('.tile[data-kind="both"]');
-  await sharer.page.click('#btn-share');
-  await sharer.page.waitForFunction(() => window.__shared);
-  const shared = await sharer.page.evaluate(() => window.__shared);
-  check('phone: share hands over the .mid and the voice .wav', shared.length === 2 && shared[0].name === 'musictool-sample.mid' && shared[0].type === 'audio/midi' && shared[1].name === 'musictool-sample-voice.wav' && shared.every((f) => f.size > 40) && (await sharer.page.isHidden('#export')), shared.map((f) => `${f.name} ${f.type} ${f.size} B`).join(', '));
-  await sharer.page.evaluate(() => (window.__shareMidi = false));
-  await sharer.page.click('#btn-export');
-  await sharer.page.click('.tile[data-kind="midi"]');
-  const midiHidden = await sharer.page.isHidden('#btn-share');
-  await sharer.page.click('.tile[data-kind="wav"]');
-  check('phone: the share button follows what the share sheet takes', midiHidden && (await sharer.page.isVisible('#btn-share')));
-  await sharer.page.keyboard.press('Escape');
-  check('no page errors (share)', sharer.page.errors.length === 0, sharer.page.errors.join(' | '));
-  await sharer.context.close();
+  // ---- share sheet: an iPhone takes the .mid and the voice as separate files; Android gets no 共有 for MIDI
+  const iphone = await newApp(browser, { ...devices['iPhone 13'], deviceScaleFactor: 1 }, shareSheet);
+  await iphone.page.click('#btn-export');
+  await iphone.page.click('.tile[data-kind="both"]');
+  await iphone.page.click('#btn-share');
+  await iphone.page.waitForFunction(() => window.__shared);
+  const shared = await iphone.page.evaluate(() => window.__shared);
+  check('iPhone: share hands over the .mid and the voice .wav', shared.length === 2 && shared[0].name === 'musictool-sample.mid' && shared[0].type === 'audio/midi' && shared[1].name === 'musictool-sample-voice.wav' && shared.every((f) => f.size > 40) && (await iphone.page.isHidden('#export')), shared.map((f) => `${f.name} ${f.type} ${f.size} B`).join(', '));
+  await iphone.page.evaluate(() => (window.__shareFails = true));
+  await iphone.page.click('#btn-export');
+  const [fallbackDl] = await Promise.all([iphone.page.waitForEvent('download'), iphone.page.click('#btn-share')]);
+  check('a refused share downloads the files instead', fallbackDl.suggestedFilename() === 'musictool-sample.zip' && /ダウンロード/.test(await iphone.page.textContent('#toast')), `${fallbackDl.suggestedFilename()}: ${await iphone.page.textContent('#toast')}`);
+  check('no page errors (iPhone share)', iphone.page.errors.length === 0, iphone.page.errors.join(' | '));
+  await iphone.context.close();
+  const android = await newApp(browser, { ...devices['Pixel 7'], deviceScaleFactor: 1 }, shareSheet);
+  await android.page.click('#btn-export');
+  const shareFor = async (kind) => {
+    await android.page.click(`.tile[data-kind="${kind}"]`);
+    return android.page.isVisible('#btn-share');
+  };
+  const androidShare = { both: await shareFor('both'), midi: await shareFor('midi'), wav: await shareFor('wav') };
+  check('Android: 共有 only for the voice .wav (its share sheet refuses .mid)', !androidShare.both && !androidShare.midi && androidShare.wav, JSON.stringify(androidShare));
+  await android.context.close();
 
   // ---- AudioWorklet unavailable: the ScriptProcessor fallback keeps the timeline
   const fallback = await newApp(browser, {}, () => {
@@ -485,17 +513,30 @@ try {
   const loop = await newApp(browser, {}, loopbackMic);
   await loop.page.click('#btn-settings');
   await loop.page.click('#btn-measure');
-  check('the measurement locks recording and the input mode', (await loop.page.isDisabled('#btn-rec')) && (await loop.page.isDisabled('.seg[data-setting="mode"] button[data-v="hum"]')) && (await loop.page.textContent('#btn-measure')) === '測定中');
+  check('the measurement locks recording and the input mode, and offers to stop', (await loop.page.isDisabled('#btn-rec')) && (await loop.page.isDisabled('.seg[data-setting="mode"] button[data-v="hum"]')) && (await loop.page.textContent('#btn-measure')) === 'やめる' && (await loop.page.isEnabled('#btn-measure')));
   await loop.page.waitForFunction(() => window.__mt.phase === 'idle', null, { timeout: 20000 });
   const measured = await loop.page.evaluate(() => ({ m: window.__mt.measured(), latencyMs: window.__mt.latencyMs, note: document.querySelector('#latency-note').textContent }));
-  const panel = await loop.page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#measure dt')].map((dt) => [dt.textContent, dt.nextElementSibling.textContent])));
-  check('loopback: the round trip is measured', measured.m && measured.m.ms >= 120 && measured.m.ms < 200 && measured.m.heard === measured.m.covered && measured.m.covered >= 9, JSON.stringify(measured));
-  check('loopback: the correction makes the applied delay the measured one', measured.latencyMs !== 0 && Math.abs(parseInt(panel['遅れ'], 10) - measured.m?.ms) <= 1, `${panel['遅れ']} applied, ${panel['実測']} measured, correction ${measured.latencyMs} ms; ${measured.note}`);
-  check('loopback: the correction is kept', (await loop.page.evaluate(() => JSON.parse(localStorage.getItem('musictool.prefs.v1')).latencyMs)) === measured.latencyMs);
+  check('loopback: the round trip is measured', measured.m && measured.m.ms >= 120 && measured.m.ms < 200 && measured.m.heard === measured.m.covered && measured.m.covered >= 9 && measured.latencyMs !== 0, JSON.stringify(measured));
+  check('loopback: the measurement is kept', (await loop.page.evaluate(() => JSON.parse(localStorage.getItem('musictool.prefs.v1')))).measured?.ms === measured.m?.ms);
+  check('loopback: the measurement releases the microphone', (await liveTracks(loop.page)) === 0);
+  // A take with the metronome: the loopback records the clicks late; with the correction they land on the beats.
+  await loop.page.keyboard.press('Escape');
+  await loop.page.fill('#bpm', '100');
+  await loop.page.press('#bpm', 'Enter');
+  await recordTake(loop.page, 2600);
+  await loop.page.click('#btn-export');
+  await loop.page.click('.tile[data-kind="wav"]');
+  const [takeDl] = await Promise.all([loop.page.waitForEvent('download'), loop.page.click('#btn-download')]);
+  const takePath = join(out, 'loopback-take.wav');
+  await takeDl.saveAs(takePath);
+  const takeWav = readWav(await readFile(takePath));
+  const onsets = [0.6, 1.2, 1.8].map((t) => clickOnset(takeWav, t) - t);
+  check('loopback: the clicks in the take start on the beats', onsets.every((d) => Math.abs(d) <= 0.003), onsets.map((d) => `${(d * 1000).toFixed(1)} ms`).join(', '));
   check('no page errors (loopback)', loop.page.errors.length === 0, loop.page.errors.join(' | '));
   await loop.context.close();
 
-  // ---- a microphone that does not hear the speakers (Chromium's fake one plays a singer): no change
+  // ---- a microphone that does not hear the speakers (Chromium's fake one plays a singer): no change; then a
+  // measurement stopped halfway changes nothing either
   const deaf = await newApp(browser);
   await deaf.page.click('#btn-settings');
   await deaf.page.click('#btn-measure');
@@ -503,6 +544,13 @@ try {
   const deafState = await deaf.page.evaluate(() => ({ m: window.__mt.measured(), latencyMs: window.__mt.latencyMs, warn: document.querySelector('#latency-note').classList.contains('warn') }));
   check('chirps not heard: a warning and no correction', deafState.m === null && deafState.latencyMs === 0 && deafState.warn, JSON.stringify(deafState));
   check('the measurement releases the microphone', (await liveTracks(deaf.page)) === 0);
+  await deaf.page.click('#btn-measure');
+  await deaf.page.waitForTimeout(1200);
+  await deaf.page.click('#btn-measure');
+  const stopped = await deaf.page.evaluate(() => ({ phase: window.__mt.phase, latencyMs: window.__mt.latencyMs, label: document.querySelector('#btn-measure').textContent, focus: document.activeElement?.id }));
+  await deaf.page.waitForTimeout(400);
+  check('やめる stops the measurement at once, keeps focus and changes nothing', stopped.phase === 'idle' && stopped.latencyMs === 0 && stopped.label === '測る' && stopped.focus === 'btn-measure', JSON.stringify(stopped));
+  check('a stopped measurement releases the microphone', (await liveTracks(deaf.page)) === 0);
   check('no page errors (measurement)', deaf.page.errors.length === 0, deaf.page.errors.join(' | '));
   await deaf.context.close();
 
