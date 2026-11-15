@@ -122,7 +122,8 @@
     <div class="field"><span class="lbl">表記</span><div class="seg" data-setting="notation"><button type="button" data-v="letter">C D E</button><button type="button" data-v="doremi">ドレミ</button></div></div>
     <div class="field"><span class="lbl">中央のド</span><div class="seg" data-setting="middleC"><button type="button" data-v="3">C3</button><button type="button" data-v="4">C4</button><button type="button" data-v="5">C5</button></div></div>
     <div class="field"><span class="lbl">入力</span><div class="seg" data-setting="mode"><button type="button" data-v="sing">歌声</button><button type="button" data-v="hum">ハミング</button><button type="button" data-v="whistle">口笛</button></div></div>
-    <div class="field" id="field-latency"><span class="lbl">遅れ補正</span><input id="latency" type="range" min="-100" max="200" step="5" value="0" aria-label="遅れ補正"><span class="val" id="latency-val">0 ms</span></div>
+    <div class="field" id="field-latency"><span class="lbl">遅れ補正</span><input id="latency" type="range" value="0" aria-label="遅れ補正"><span class="val" id="latency-val">0 ms</span></div>
+    <div class="subfield" id="row-measure"><button type="button" class="soft" id="btn-measure">測る</button><p class="note" id="latency-note" role="status"></p></div>
     <div class="field"><span class="lbl">サンプル</span><button type="button" class="soft" id="btn-sample">
       <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-6 4 12 3-9 2 3h4"/></svg>読み込む</button></div>
     <dl class="measure" id="measure"></dl>
@@ -162,10 +163,16 @@
       </svg>
     </div>
     <p class="note" id="export-note" hidden></p>
-    <button type="button" class="primary wide" id="btn-download">
-      <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><polyline points="7 10 12 15 17 10"/><path d="M5 19h14"/></svg>
-      <span>ダウンロード</span>
-    </button>
+    <div class="actions-row">
+      <button type="button" class="primary wide" id="btn-download">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><polyline points="7 10 12 15 17 10"/><path d="M5 19h14"/></svg>
+        <span>ダウンロード</span>
+      </button>
+      <button type="button" class="soft share" id="btn-share" hidden>
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><polyline points="7 8 12 3 17 8"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>
+        <span>共有</span>
+      </button>
+    </div>
   </section>
 
   <div class="toast" id="toast" role="status" hidden></div>

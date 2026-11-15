@@ -76,6 +76,29 @@ export function saveWithLink(file: OutFile): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+/** The files as File objects, for the system share sheet. */
+export function asFiles(files: OutFile[]): File[] {
+  return files.map((f) => new File([f.data as BlobPart], f.name, { type: mimeOf(f.name) }));
+}
+
+/**
+ * Is there a system share sheet that takes files? canShare() only says whether files can be shared at all: neither
+ * Chromium nor WebKit looks at their type or size there (Android's sheet refuses .mid only when share() is called).
+ */
+export function canShareFiles(): boolean {
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false;
+  try {
+    return navigator.canShare({ files: asFiles([{ name: 'voice.wav', data: new Uint8Array(0) }]) });
+  } catch {
+    return false;
+  }
+}
+
+/** Android's share sheet (Chrome and the browsers built on it) refuses .mid files; .wav goes through. */
+export function shareRefusesMidi(): boolean {
+  return typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+}
+
 function mimeOf(name: string): string {
   if (name.endsWith('.mid')) return 'audio/midi';
   if (name.endsWith('.wav')) return 'audio/wav';
