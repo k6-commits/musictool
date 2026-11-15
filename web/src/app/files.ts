@@ -49,12 +49,20 @@ export function buildMidi(input: ExportInput): Uint8Array {
   });
 }
 
+/** The names of the files an export of this kind writes: the .mid, then the voice. */
+export function exportNames(kind: ExportKind, name: string): string[] {
+  const base = safeName(name);
+  const names: string[] = [];
+  if (kind !== 'wav') names.push(`${base}.mid`);
+  if (kind !== 'midi') names.push(`${base}-voice.wav`);
+  return names;
+}
+
 export function buildFiles(kind: ExportKind, input: ExportInput): OutFile[] {
-  const base = safeName(input.name);
-  const files: OutFile[] = [];
-  if (kind !== 'wav') files.push({ name: `${base}.mid`, data: buildMidi(input) });
-  if (kind !== 'midi') files.push({ name: `${base}-voice.wav`, data: encodeWav(input.voice, input.sampleRate) });
-  return files;
+  return exportNames(kind, input.name).map((name) => ({
+    name,
+    data: name.endsWith('.mid') ? buildMidi(input) : encodeWav(input.voice, input.sampleRate),
+  }));
 }
 
 /** One file to save: the file itself, or a zip when there are several (or when only zip is allowed). */
@@ -74,6 +82,24 @@ export function saveWithLink(file: OutFile): void {
   a.click();
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/** The files as File objects, for the system share sheet. */
+export function asFiles(files: OutFile[]): File[] {
+  return files.map((f) => new File([f.data as BlobPart], f.name, { type: mimeOf(f.name) }));
+}
+
+/**
+ * Can the system share sheet take files with these names? iOS takes any file; Android Chrome only some types
+ * (.wav but not .mid or .zip); desktop Linux has no share sheet.
+ */
+export function canShareFiles(names: string[]): boolean {
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false;
+  try {
+    return navigator.canShare({ files: names.map((n) => new File([], n, { type: mimeOf(n) })) });
+  } catch {
+    return false;
+  }
 }
 
 function mimeOf(name: string): string {

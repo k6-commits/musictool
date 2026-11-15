@@ -3,6 +3,7 @@
 //  - audio files: upload, drop anywhere, a 5-minute take
 //  - editing, playback, shortcuts, settings, the claude.ai artifact mode, a phone layout
 //  - the ScriptProcessor fallback and a stereo input with the voice on one channel
+//  - the latency measurement, through a loopback microphone and through one that does not hear the speakers
 //  - the synth envelope and lazy note scheduling (OfflineAudioContext)
 // Needs Playwright with Chromium: `npm i -D playwright && npx playwright install chromium`.
 import { build } from 'esbuild';
@@ -82,6 +83,38 @@ const trackMic = () => {
   };
 };
 const liveTracks = (page) => page.evaluate(() => window.__tracks.filter((t) => t.readyState === 'live').length);
+
+// A share sheet that takes any file (as on iOS), or only .wav once __shareMidi is false (as Android Chrome);
+// it records what it was given.
+const shareSheet = () => {
+  navigator.canShare = (data) => (data.files ?? []).every((f) => f.name.endsWith('.wav') || window.__shareMidi !== false);
+  navigator.share = async (data) => {
+    window.__shared = data.files.map((f) => ({ name: f.name, size: f.size, type: f.type }));
+  };
+};
+
+// A loopback microphone: whatever the page sends to its speakers comes back as microphone input 120 ms later.
+const loopbackMic = () => {
+  const DELAY = 0.12;
+  const connect = AudioNode.prototype.connect;
+  let tap = null;
+  window.AudioContext = class extends window.AudioContext {
+    constructor(...args) {
+      super(...args);
+      const line = this.createDelay(1);
+      line.delayTime.value = DELAY;
+      const out = this.createMediaStreamDestination();
+      connect.call(line, out);
+      tap = { ctx: this, line, out };
+    }
+  };
+  AudioNode.prototype.connect = function (target, ...rest) {
+    const result = connect.call(this, target, ...rest);
+    if (tap && target === tap.ctx.destination) connect.call(this, tap.line);
+    return result;
+  };
+  navigator.mediaDevices.getUserMedia = async () => new MediaStream(tap.out.stream.getAudioTracks().map((t) => t.clone()));
+};
 
 async function newApp(browser, options = {}, initScript = null) {
   const context = await browser.newContext({ viewport: { width: 1360, height: 860 }, deviceScaleFactor: 1, acceptDownloads: true, ...options });
@@ -240,6 +273,7 @@ try {
   // ---- export MIDI + voice (zip)
   await page.click('#btn-export');
   await page.click('.tile[data-kind="both"]');
+  check('no share button on a computer', await page.isHidden('#btn-share'));
   const [zipDl] = await Promise.all([page.waitForEvent('download'), page.click('#btn-download')]);
   await zipDl.saveAs(join(out, zipDl.suggestedFilename()));
   const exp = await page.evaluate(() => window.__mt.lastExport());
@@ -414,6 +448,25 @@ try {
   check('no page errors (phone)', phone.page.errors.length === 0, phone.page.errors.join(' | '));
   await phone.context.close();
 
+  // ---- phone: the share sheet gets the .mid and the voice as separate files (a fresh page: the touch events
+  // sent through CDP above leave the emulated phone without its coarse pointer)
+  const sharer = await newApp(browser, { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }, shareSheet);
+  await sharer.page.click('#btn-export');
+  await sharer.page.click('.tile[data-kind="both"]');
+  await sharer.page.click('#btn-share');
+  await sharer.page.waitForFunction(() => window.__shared);
+  const shared = await sharer.page.evaluate(() => window.__shared);
+  check('phone: share hands over the .mid and the voice .wav', shared.length === 2 && shared[0].name === 'musictool-sample.mid' && shared[0].type === 'audio/midi' && shared[1].name === 'musictool-sample-voice.wav' && shared.every((f) => f.size > 40) && (await sharer.page.isHidden('#export')), shared.map((f) => `${f.name} ${f.type} ${f.size} B`).join(', '));
+  await sharer.page.evaluate(() => (window.__shareMidi = false));
+  await sharer.page.click('#btn-export');
+  await sharer.page.click('.tile[data-kind="midi"]');
+  const midiHidden = await sharer.page.isHidden('#btn-share');
+  await sharer.page.click('.tile[data-kind="wav"]');
+  check('phone: the share button follows what the share sheet takes', midiHidden && (await sharer.page.isVisible('#btn-share')));
+  await sharer.page.keyboard.press('Escape');
+  check('no page errors (share)', sharer.page.errors.length === 0, sharer.page.errors.join(' | '));
+  await sharer.context.close();
+
   // ---- AudioWorklet unavailable: the ScriptProcessor fallback keeps the timeline
   const fallback = await newApp(browser, {}, () => {
     AudioWorklet.prototype.addModule = () => Promise.reject(new Error('blocked for the test'));
@@ -427,6 +480,31 @@ try {
   check('ScriptProcessor fallback: the microphone is released', (await liveTracks(fallback.page)) === 0);
   check('no page errors (fallback)', fallback.page.errors.length === 0, fallback.page.errors.join(' | '));
   await fallback.context.close();
+
+  // ---- latency measurement through a loopback "microphone" that hears the speakers 120 ms late
+  const loop = await newApp(browser, {}, loopbackMic);
+  await loop.page.click('#btn-settings');
+  await loop.page.click('#btn-measure');
+  check('the measurement locks recording and the input mode', (await loop.page.isDisabled('#btn-rec')) && (await loop.page.isDisabled('.seg[data-setting="mode"] button[data-v="hum"]')) && (await loop.page.textContent('#btn-measure')) === '測定中');
+  await loop.page.waitForFunction(() => window.__mt.phase === 'idle', null, { timeout: 20000 });
+  const measured = await loop.page.evaluate(() => ({ m: window.__mt.measured(), latencyMs: window.__mt.latencyMs, note: document.querySelector('#latency-note').textContent }));
+  const panel = await loop.page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#measure dt')].map((dt) => [dt.textContent, dt.nextElementSibling.textContent])));
+  check('loopback: the round trip is measured', measured.m && measured.m.ms >= 120 && measured.m.ms < 200 && measured.m.heard === measured.m.covered && measured.m.covered >= 9, JSON.stringify(measured));
+  check('loopback: the correction makes the applied delay the measured one', measured.latencyMs !== 0 && Math.abs(parseInt(panel['遅れ'], 10) - measured.m?.ms) <= 1, `${panel['遅れ']} applied, ${panel['実測']} measured, correction ${measured.latencyMs} ms; ${measured.note}`);
+  check('loopback: the correction is kept', (await loop.page.evaluate(() => JSON.parse(localStorage.getItem('musictool.prefs.v1')).latencyMs)) === measured.latencyMs);
+  check('no page errors (loopback)', loop.page.errors.length === 0, loop.page.errors.join(' | '));
+  await loop.context.close();
+
+  // ---- a microphone that does not hear the speakers (Chromium's fake one plays a singer): no change
+  const deaf = await newApp(browser);
+  await deaf.page.click('#btn-settings');
+  await deaf.page.click('#btn-measure');
+  await deaf.page.waitForFunction(() => window.__mt.phase === 'idle', null, { timeout: 20000 });
+  const deafState = await deaf.page.evaluate(() => ({ m: window.__mt.measured(), latencyMs: window.__mt.latencyMs, warn: document.querySelector('#latency-note').classList.contains('warn') }));
+  check('chirps not heard: a warning and no correction', deafState.m === null && deafState.latencyMs === 0 && deafState.warn, JSON.stringify(deafState));
+  check('the measurement releases the microphone', (await liveTracks(deaf.page)) === 0);
+  check('no page errors (measurement)', deaf.page.errors.length === 0, deaf.page.errors.join(' | '));
+  await deaf.context.close();
 
   // ---- claude.ai artifact mode: no microphone, files are saved through the viewer as .zip
   const art = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });

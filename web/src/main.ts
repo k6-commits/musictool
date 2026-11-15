@@ -1,6 +1,7 @@
 // musictool prototype: sing (or open a recording) -> pitch -> notes -> edit -> MIDI.
-import { buildFiles, packageFiles, safeName, saveWithLink, type ExportKind } from './app/files';
+import { asFiles, buildFiles, canShareFiles, exportNames, packageFiles, safeName, saveWithLink, type ExportKind, type OutFile } from './app/files';
 import { MicCapture, TakeRecorder } from './audio/capture';
+import { measureLatency, reportedLatency } from './audio/latency';
 import { INSTRUMENTS, Player, type Instrument } from './audio/player';
 import { analyzePitch, engineFor, HOP_SEC, LivePitch, type Analysis, type AnalyzeStats, type InputMode, type PitchEngine, type PitchFrame } from './dsp/pitch';
 import { detectKey } from './music/keydetect';
@@ -59,7 +60,7 @@ const CHROMATIC: Key = { tonic: 0, mode: 'chromatic' };
 const MAX_FILE_SECONDS = 6 * 60;
 const MAX_RECORD_SECONDS = 10 * 60;
 
-type Phase = 'idle' | 'arming' | 'count' | 'rec' | 'analyzing';
+type Phase = 'idle' | 'arming' | 'count' | 'rec' | 'analyzing' | 'measuring';
 type Source = 'mic' | 'file' | 'sample';
 
 interface Take {
@@ -121,6 +122,10 @@ interface Prefs {
 }
 
 const PREFS_KEY = 'musictool.prefs.v1';
+/** The latency correction's range in ms (the settings slider's). */
+const LATENCY_MIN = -200;
+const LATENCY_MAX = 600;
+const clampLatency = (ms: number): number => Math.max(LATENCY_MIN, Math.min(LATENCY_MAX, Math.round(ms)));
 const defaultPrefs: Prefs = {
   notation: 'letter',
   middleC: 4,
@@ -142,7 +147,7 @@ function loadPrefs(): Prefs {
     if (typeof raw.mode === 'string' && Object.hasOwn(SEGMENT_PARAMS, raw.mode)) p.mode = raw.mode as InputMode;
     if (typeof raw.countIn === 'boolean') p.countIn = raw.countIn;
     if (typeof raw.metronome === 'boolean') p.metronome = raw.metronome;
-    if (typeof raw.latencyMs === 'number' && Number.isFinite(raw.latencyMs)) p.latencyMs = Math.max(-100, Math.min(200, raw.latencyMs));
+    if (typeof raw.latencyMs === 'number' && Number.isFinite(raw.latencyMs)) p.latencyMs = clampLatency(raw.latencyMs);
     if (INSTRUMENTS.some((i) => i.id === raw.instrument)) p.instrument = raw.instrument as Instrument;
     if (typeof raw.balance === 'number' && Number.isFinite(raw.balance)) p.balance = Math.max(0, Math.min(1, raw.balance));
   } catch {
@@ -187,6 +192,10 @@ const S = {
   mic: micAllowed(),
   /** The last microphone used, for the measurement panel (device latency, without the manual correction). */
   lastInput: null as { kind: string; deviceLatencyMs: number } | null,
+  /** This session's loopback measurement (round trip; chirps heard of those recorded; spread of their delays). */
+  measured: null as { ms: number; heard: number; covered: number; spreadMs: number } | null,
+  /** The line under the latency correction: the measurement's progress or result. */
+  latencyNote: null as { text: string; tone: '' | 'ok' | 'warn' } | null,
 };
 
 let ctx: AudioContext | null = null;
@@ -204,15 +213,6 @@ function audio(): AudioContext {
 function getPlayer(): Player {
   if (!player) player = new Player(audio());
   return player;
-}
-
-/**
- * Output latency. Chromium's outputLatency already includes the callback buffer that baseLatency reports,
- * Firefox reports baseLatency as 0 and WebKit's is one render quantum, so adding the two would count the
- * buffer twice: outputLatency alone, or baseLatency where outputLatency is not reported.
- */
-function outputLatency(ac: AudioContext): number {
-  return ac.outputLatency || ac.baseLatency || 0;
 }
 
 // ---------------------------------------------------------------- elements
@@ -268,12 +268,16 @@ const el = {
   latency: $<HTMLInputElement>('latency'),
   latencyVal: $('latency-val'),
   fieldLatency: $('field-latency'),
+  rowMeasure: $('row-measure'),
+  btnMeasure: $<HTMLButtonElement>('btn-measure'),
+  latencyNote: $('latency-note'),
   btnSample: $<HTMLButtonElement>('btn-sample'),
   measure: $('measure'),
   exportSheet: $('export'),
   exportName: $<HTMLInputElement>('export-name'),
   exportNote: $('export-note'),
   btnDownload: $<HTMLButtonElement>('btn-download'),
+  btnShare: $<HTMLButtonElement>('btn-share'),
   toast: $('toast'),
 };
 
@@ -687,6 +691,22 @@ function songOffset(r: Rec): number {
   return r.recorder.firstFrame / r.sampleRate - r.zeroTime - r.latency;
 }
 
+/** A microphone that did not open: refused (the app then works from files) or failed. */
+function micFailed(e: unknown): void {
+  const name = (e as { name?: string })?.name;
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    S.mic = false;
+    toast('マイクが使えません。音声ファイルを開いてください', 'warn');
+  } else {
+    toast('マイクを開けませんでした', 'warn');
+  }
+}
+
+/** Remember the microphone path for the measurement panel. */
+function noteInput(capture: MicCapture, deviceLatency: number): void {
+  S.lastInput = { kind: capture.kind === 'worklet' ? 'Worklet' : 'ScriptProcessor', deviceLatencyMs: Math.round(deviceLatency * 1000) };
+}
+
 async function startRecording(): Promise<void> {
   if (S.phase !== 'idle' || !S.mic) return;
   stopPlayback();
@@ -703,13 +723,7 @@ async function startRecording(): Promise<void> {
   } catch (e) {
     if (token !== armToken) return;
     S.phase = 'idle';
-    const name = (e as { name?: string })?.name;
-    if (name === 'NotAllowedError' || name === 'SecurityError') {
-      S.mic = false;
-      toast('マイクが使えません。音声ファイルを開いてください', 'warn');
-    } else {
-      toast('マイクを開けませんでした', 'warn');
-    }
+    micFailed(e);
     renderTransport();
     renderInspector();
     return;
@@ -723,9 +737,9 @@ async function startRecording(): Promise<void> {
   const spb = 60 / S.bpm;
   const t0 = ac.currentTime + 0.15;
   const countBeats = P.countIn ? BEATS_PER_BAR : 0;
-  const deviceLatency = outputLatency(ac) + capture.inputLatency;
+  const deviceLatency = reportedLatency(ac, capture);
   const latency = deviceLatency + P.latencyMs / 1000;
-  S.lastInput = { kind: capture.kind === 'worklet' ? 'Worklet' : 'ScriptProcessor', deviceLatencyMs: Math.round(deviceLatency * 1000) };
+  noteInput(capture, deviceLatency);
   const r: Rec = {
     capture,
     recorder: new TakeRecorder(),
@@ -902,6 +916,10 @@ async function stopRecording(): Promise<void> {
   rec = null;
   window.clearInterval(r.clickTimer);
   cancelClicks(r, -Infinity);
+  // The browser's estimate again, now that audio has run for the whole take (some report 0 at first).
+  const deviceLatency = reportedLatency(audio(), r.capture);
+  r.latency = deviceLatency + P.latencyMs / 1000;
+  noteInput(r.capture, deviceLatency);
   r.capture.close();
   el.count.hidden = true;
   // Decided by the clock, not the phase: in a background tab the phase may not have caught up yet.
@@ -936,6 +954,55 @@ async function stopRecording(): Promise<void> {
 
 function isRecording(): boolean {
   return S.phase === 'arming' || S.phase === 'count' || S.phase === 'rec';
+}
+
+// ---------------------------------------------------------------- latency measurement
+
+/**
+ * Measure the round trip through the speaker and the microphone (src/audio/latency.ts). What the browser does not
+ * report becomes the correction, so a later change it does report (another output device) still counts.
+ */
+async function measureDelay(): Promise<void> {
+  if (S.phase !== 'idle' || !S.mic) return;
+  stopPlayback();
+  S.phase = 'measuring';
+  S.latencyNote = { text: 'スピーカーの音で測っています…', tone: '' };
+  renderTransport();
+  renderSettings();
+  const ac = audio();
+  let capture: MicCapture;
+  try {
+    await ac.resume();
+    capture = await MicCapture.open(ac);
+  } catch (e) {
+    S.phase = 'idle';
+    S.latencyNote = null;
+    micFailed(e);
+    renderTransport();
+    renderSettings();
+    return;
+  }
+  try {
+    const m = await measureLatency(ac, capture);
+    const deviceLatency = reportedLatency(ac, capture);
+    noteInput(capture, deviceLatency);
+    if (m.latency === null) {
+      S.latencyNote = { text: '聞き取れませんでした。イヤホンを外し、音量を上げてもう一度どうぞ', tone: 'warn' };
+    } else {
+      P.latencyMs = clampLatency((m.latency - deviceLatency) * 1000);
+      savePrefs();
+      S.measured = { ms: Math.round(m.latency * 1000), heard: m.heard, covered: m.covered, spreadMs: m.spread * 1000 };
+      S.latencyNote = { text: `往復 ${S.measured.ms} ms に合わせました`, tone: 'ok' };
+    }
+  } catch {
+    S.latencyNote = { text: '測れませんでした', tone: 'warn' };
+  } finally {
+    capture.close();
+    S.phase = 'idle';
+  }
+  if (el.settings.hidden) toast(S.latencyNote.text, S.latencyNote.tone);
+  renderTransport();
+  renderSettings();
 }
 
 // ---------------------------------------------------------------- playback
@@ -1042,15 +1109,17 @@ function renderTransport(): void {
   el.btnRec.classList.toggle('count', S.phase === 'count' || S.phase === 'arming');
   el.btnRec.setAttribute('aria-label', recording ? '停止' : '録音をはじめる');
   el.btnRec.title = recording ? '停止（R）' : '録音（R）';
-  el.btnRec.disabled = S.phase === 'analyzing';
+  const busy = S.phase === 'analyzing' || S.phase === 'measuring';
+  el.btnRec.disabled = busy;
   el.btnMetro.hidden = !S.mic;
   el.btnCount.hidden = !S.mic;
   el.fieldLatency.hidden = !S.mic;
+  el.rowMeasure.hidden = !S.mic;
   el.btnOpen.classList.toggle('accent', !S.mic);
   const playing = !!player?.playing;
   el.btnPlay.classList.toggle('on', playing || recording);
   el.btnPlay.setAttribute('aria-label', playing || recording ? '停止' : '再生');
-  el.btnPlay.disabled = S.phase === 'analyzing' || (!S.take && !recording);
+  el.btnPlay.disabled = busy || (!S.take && !recording);
   el.btnExport.disabled = !S.take || S.phase !== 'idle';
   el.btnOpen.disabled = S.phase !== 'idle';
   el.btnUndo.disabled = S.undo.length === 0 || S.phase !== 'idle';
@@ -1435,7 +1504,13 @@ function renderSettings(): void {
   }
   el.btnSample.disabled = !idle;
   el.latency.value = String(P.latencyMs);
+  el.latency.disabled = S.phase === 'measuring';
   el.latencyVal.textContent = `${P.latencyMs > 0 ? '+' : ''}${P.latencyMs} ms`;
+  el.btnMeasure.disabled = !idle;
+  el.btnMeasure.textContent = S.phase === 'measuring' ? '測定中' : '測る';
+  const note = S.latencyNote ?? { text: 'イヤホンを外して押すと、スピーカーの音で合わせます', tone: '' };
+  el.latencyNote.textContent = note.text;
+  el.latencyNote.className = `note ${note.tone}`;
   renderMeasure();
 }
 
@@ -1455,7 +1530,12 @@ function renderMeasure(): void {
   }
   if (S.lastInput) {
     rows.push(['入力', S.lastInput.kind]);
-    rows.push(['遅れ', `${S.lastInput.deviceLatencyMs + P.latencyMs} ms`]);
+    // What a take subtracts: the browser's own estimate plus the correction.
+    rows.push(['遅れ', `${S.lastInput.deviceLatencyMs + P.latencyMs} ms（申告 ${S.lastInput.deviceLatencyMs} ＋ 補正 ${P.latencyMs}）`]);
+  }
+  if (S.measured) {
+    const m = S.measured;
+    rows.push(['実測', `${m.ms} ms（${m.heard}/${m.covered} 回、ばらつき ${m.spreadMs.toFixed(1)} ms）`]);
   }
   el.measure.innerHTML = '';
   for (const [k, v] of rows) {
@@ -1478,6 +1558,9 @@ function renderExport(zipOnly: boolean): void {
   }
   el.exportNote.hidden = !zipOnly;
   el.exportNote.textContent = zipOnly ? 'ZIP にまとめて保存。展開して DAW へ' : '';
+  // Phones and tablets: the share sheet sends the files on (AirDrop to the computer with the DAW, a cloud drive)
+  // without a trip through the downloads folder. Each file goes as it is, without a zip.
+  el.btnShare.hidden = zipOnly || !matchMedia('(pointer: coarse)').matches || !canShareFiles(exportNames(S.exportKind, 'x'));
 }
 
 function openExport(): void {
@@ -1488,12 +1571,13 @@ function openExport(): void {
   showSheet(el.exportSheet);
 }
 
-async function doExport(): Promise<void> {
+/** The files of the chosen kind, or null (with a message) when there is nothing to write. */
+function exportFiles(): { name: string; files: OutFile[] } | null {
   const t = S.take;
-  if (!t) return;
+  if (!t) return null;
   if (S.exportKind !== 'wav' && S.notes.length === 0) {
     toast('ノートがありません', 'warn');
-    return;
+    return null;
   }
   const name = safeName(el.exportName.value || t.name);
   const voice = samples(t);
@@ -1508,6 +1592,13 @@ async function doExport(): Promise<void> {
     voice: voice.subarray(startSample),
     sampleRate: t.sampleRate,
   });
+  return { name, files };
+}
+
+async function doExport(): Promise<void> {
+  const built = exportFiles();
+  if (!built) return;
+  const { name, files } = built;
   const out = packageFiles(files, name, savesThroughHost);
   lastExport = { filename: out.name, files: files.map((f) => ({ name: f.name, size: f.data.length })) };
   if (!savesThroughHost) {
@@ -1532,6 +1623,19 @@ async function doExport(): Promise<void> {
     if (code === 'rate_limited') toast('少し待ってからもう一度どうぞ', 'warn');
     else if (code === 'extension_not_enabled' || code === 'rejected_extension') toast('この画面では ZIP を保存できません', 'warn');
     else toast('保存できませんでした', 'warn');
+  }
+}
+
+/** Hand the files to the system share sheet (called from the click, which the share sheet needs). */
+async function doShare(): Promise<void> {
+  const built = exportFiles();
+  if (!built) return;
+  lastExport = { filename: '', files: built.files.map((f) => ({ name: f.name, size: f.data.length })) };
+  try {
+    await navigator.share({ files: asFiles(built.files) });
+    closeSheet();
+  } catch (e) {
+    if ((e as { name?: string })?.name !== 'AbortError') toast('共有できませんでした', 'warn');
   }
 }
 
@@ -1607,6 +1711,7 @@ el.btnSettings.addEventListener('click', () => {
 el.btnUndo.addEventListener('click', undo);
 el.btnExport.addEventListener('click', openExport);
 el.btnDownload.addEventListener('click', () => void doExport());
+el.btnShare.addEventListener('click', () => void doShare());
 for (const tile of el.exportSheet.querySelectorAll<HTMLButtonElement>('.tile')) {
   tile.addEventListener('click', () => {
     S.exportKind = tile.dataset.kind as ExportKind;
@@ -1633,11 +1738,14 @@ for (const seg of el.settings.querySelectorAll<HTMLElement>('.seg')) {
     if (key === 'mode') void reanalyze();
   });
 }
+el.latency.min = String(LATENCY_MIN);
+el.latency.max = String(LATENCY_MAX);
 el.latency.addEventListener('input', () => {
-  P.latencyMs = Number(el.latency.value);
+  P.latencyMs = clampLatency(Number(el.latency.value));
   savePrefs();
   renderSettings();
 });
+el.btnMeasure.addEventListener('click', () => void measureDelay());
 el.btnSample.addEventListener('click', () => {
   if (S.phase !== 'idle') return;
   closeSheet();
@@ -1816,6 +1924,10 @@ function trapFocus(e: KeyboardEvent, root: HTMLElement): void {
     return keyShort(S.key);
   },
   liveFrames: () => rec?.frames.length ?? 0,
+  get latencyMs() {
+    return P.latencyMs;
+  },
+  measured: () => S.measured,
   lastExport: () => lastExport,
   select: (index: number) => select(S.notes[index]?.id ?? null),
 };
