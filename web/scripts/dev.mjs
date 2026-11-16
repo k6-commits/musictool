@@ -12,7 +12,8 @@ const port = Number(process.env.PORT ?? 5173);
 
 async function rebuild() {
   try {
-    await buildPages({ minify: false });
+    // No manifest or service worker here: a cached page would hide the changes being made.
+    await buildPages({ minify: false, pwa: false });
     console.log(`[${new Date().toLocaleTimeString()}] built`);
   } catch (e) {
     console.error(e.message ?? e);

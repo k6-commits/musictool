@@ -5,6 +5,7 @@
 //  - the ScriptProcessor fallback and a stereo input with the voice on one channel
 //  - the latency measurement: through a loopback microphone (then a take whose clicks must land on the beats),
 //    through one that does not hear the speakers, and stopped halfway; the share sheet on iPhone and Android
+//  - the installable app: Chrome's installability check, the offline start, the install button, the back button
 //  - the synth envelope and lazy note scheduling (OfflineAudioContext)
 // Needs Playwright with Chromium: `npm i -D playwright && npx playwright install chromium`.
 import { build } from 'esbuild';
@@ -47,10 +48,26 @@ await writeFile(filePath, fileWav(44100));
 await writeFile(longPath, longWav(16000, 300));
 
 const html = await readFile(join(root, 'dist/index.html'));
+// The installed app's files next to the page, as GitHub Pages serves them. While `serverDown` is set, page and app
+// requests fail as they would with no network.
+const appFiles = { '/manifest.webmanifest': ['application/manifest+json', 'dist/manifest.webmanifest'], '/sw.js': ['text/javascript; charset=utf-8', 'dist/sw.js'] };
+for (const icon of ['icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png']) appFiles[`/${icon}`] = ['image/png', `dist/${icon}`];
+for (const f of Object.values(appFiles)) f[1] = await readFile(join(root, f[1]));
+let serverDown = false;
 // "/frame" embeds the app cross-origin (localhost -> 127.0.0.1) like the claude.ai viewer, without microphone access.
 const frameHtml = (port) =>
   `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style><iframe src="http://127.0.0.1:${port}/"></iframe>`;
 const server = createServer((req, res) => {
+  if (serverDown) {
+    req.socket.destroy();
+    return;
+  }
+  const file = appFiles[req.url.split('?')[0]];
+  if (file) {
+    res.writeHead(200, { 'content-type': file[0] });
+    res.end(file[1]);
+    return;
+  }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
   if (req.url === '/frame') res.end(frameHtml(server.address().port));
   else if (req.url === '/probe') res.end(`<!doctype html><meta charset="utf-8"><script>${probeJs}</script>`);
@@ -494,6 +511,52 @@ try {
   const androidShare = { both: await shareFor('both'), midi: await shareFor('midi'), wav: await shareFor('wav') };
   check('Android: 共有 only for the voice .wav (its share sheet refuses .mid)', !androidShare.both && !androidShare.midi && androidShare.wav, JSON.stringify(androidShare));
   await android.context.close();
+
+  // ---- the installable app on Android: Chrome's own check, the offline start, the install button, the back button
+  const pwa = await newApp(browser, { ...devices['Pixel 7'], deviceScaleFactor: 1 });
+  await pwa.page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
+  // Reloaded, the page is under the service worker's control.
+  await pwa.page.reload();
+  await pwa.page.waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle');
+  const pwaCdp = await pwa.context.newCDPSession(pwa.page);
+  const { installabilityErrors } = await pwaCdp.send('Page.getInstallabilityErrors');
+  const appManifest = await pwaCdp.send('Page.getAppManifest');
+  check('installable: Chrome reports no installability errors and a clean manifest', installabilityErrors.length === 0 && appManifest.errors.length === 0, JSON.stringify({ installabilityErrors, errors: appManifest.errors }));
+  const controlled = await pwa.page.evaluate(() => !!navigator.serviceWorker.controller);
+  serverDown = true;
+  await pwa.context.setOffline(true);
+  await pwa.page.reload();
+  const offlineOk = await pwa.page
+    .waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle', null, { timeout: 20000 })
+    .then(() => true, () => false);
+  const offlineNotes = offlineOk ? (await pwa.page.evaluate(() => window.__mt.notes())).length : 0;
+  await pwa.context.setOffline(false);
+  serverDown = false;
+  check('offline: the app opens from the service worker and analyzes the sample', controlled && offlineOk && offlineNotes === 12, `controlled ${controlled}, opened ${offlineOk}, ${offlineNotes} notes`);
+  // The browser's install prompt arrives as an event; the settings offer it once.
+  await pwa.page.evaluate(() => {
+    const e = new Event('beforeinstallprompt', { cancelable: true });
+    e.prompt = async () => {
+      window.__prompted = (window.__prompted ?? 0) + 1;
+      return { outcome: 'accepted' };
+    };
+    window.dispatchEvent(e);
+  });
+  await pwa.page.click('#btn-settings');
+  const installShown = await pwa.page.isVisible('#btn-install');
+  await pwa.page.click('#btn-install');
+  check('the install button shows the browser prompt once', installShown && (await pwa.page.evaluate(() => window.__prompted)) === 1 && (await pwa.page.isHidden('#field-install')));
+  // Back (Android's back gesture) closes the open sheet and stays in the app; closing a sheet drops its entry.
+  await pwa.page.evaluate(() => history.back());
+  await pwa.page.waitForSelector('#settings', { state: 'hidden', timeout: 3000 }).catch(() => {});
+  const backClosed = (await pwa.page.isHidden('#settings')) && (await pwa.page.evaluate(() => !!window.__mt && history.state === null));
+  await pwa.page.click('#btn-export');
+  await pwa.page.keyboard.press('Escape');
+  await pwa.page.waitForFunction(() => history.state === null, null, { timeout: 3000 }).catch(() => {});
+  const escapeDropped = await pwa.page.evaluate(() => history.state === null);
+  check('back closes the open sheet and stays in the app; a closed sheet leaves no history entry', backClosed && escapeDropped, `back ${backClosed}, escape ${escapeDropped}`);
+  check('no page errors (installable app)', pwa.page.errors.length === 0, pwa.page.errors.join(' | '));
+  await pwa.context.close();
 
   // ---- AudioWorklet unavailable: the ScriptProcessor fallback keeps the timeline
   const fallback = await newApp(browser, {}, () => {

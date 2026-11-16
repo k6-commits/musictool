@@ -44,6 +44,11 @@ npm run dev
 
 iPhone は Safari、Android は Chrome で https://k6-commits.github.io/musictool/ を開きます。
 
+**ホーム画面に追加すると、アプリとして使えます。** アイコンから全画面で開き、一度開いたあとは電波がなくても動きます（録音・解析・書き出しはすべて端末の中で行います）。
+- Android（Chrome）: 設定 →「アプリ」の「ホーム画面に追加」。出ていないときは、Chrome のメニュー（︙）→「アプリをインストール」または「ホーム画面に追加」
+- iPhone（Safari）: 共有ボタン →「ホーム画面に追加」
+- 新しい版は、ネットにつながった状態で開いたときに取り込みます。アプリの中では、端末の戻る操作で開いている画面（設定・書き出し）を閉じます
+
 1. **最初に遅れを測ります。** 設定 →「測る」。イヤホンを外し、音量を上げて、静かなところで押してください。5 秒ほど「チッ」という音が 10 回鳴り、スピーカーからマイクまでの往復の遅れを測って補正に入れます（途中でやめるときは「やめる」）。聞き取れなかったときは補正を変えずに知らせます。結果はこのブラウザに残りますが、サイトのデータを消したときや、Safari を 7 日ほど開かなかったときは消えるので、もう一度測ってください（未測定のまま録音を始めると知らせます）
 2. ● で録音します。クリックを聞きながら歌うなら有線イヤホンがおすすめです。測った値はスピーカーと内蔵マイクでのものなので、マイク付きのイヤホンなど別のマイクで録るときは録音の始めに知らせます。ずれていたら補正を手で動かしてください。Bluetooth イヤホンは遅れが大きく、測った値と合わないことがあります
 3. 「書き出す」→「共有」で、.mid と .wav を AirDrop・メッセージ・ドライブなどへそのまま送れます。Android の Chrome は .mid を共有できないので、MIDI を含む書き出しでは「共有」を出しません（声の .wav だけなら出ます）。共有できなかったときはダウンロードに切り替えます。PC の DAW では 1 小節目の頭に置きます
@@ -80,7 +85,7 @@ iPhone は Safari、Android は Chrome で https://k6-commits.github.io/musictoo
 npm test          # 単体テスト（79 件）
 npm run typecheck # 型チェック
 npm run eval      # 合成音声で精度を測る
-npm run e2e       # ビルドして Chromium で通しテスト（72 項目）
+npm run e2e       # ビルドして Chromium で通しテスト（77 項目）
 npm run eval:fetch && npm run eval:real   # 本物の声と雑音で精度を測る（データ約 230 MB、eval/README.md）
 ```
 
@@ -90,7 +95,7 @@ npm run eval:fetch && npm run eval:real   # 本物の声と雑音で精度を測
 npm i -D playwright && npx playwright install chromium
 ```
 
-- `npm run e2e` は Chromium の疑似マイクに合成した歌声を流し、録音 → ノート → MIDI 書き出し → MIDI を読み直して照合、ファイル読み込み・ドロップ、5 分のテイク、ノートの修正と元に戻す、キーボード操作、スマホのスワイプ、ステレオ入力、AudioWorklet が使えないときの代替経路、遅れの自動測定（スピーカーの音を 120 ms 遅れて聞くループバックのマイクで測り、続けて録ったテイクのクリックが拍に合うこと。聞こえないマイク、途中でやめる）、スマホの共有ボタン（iPhone と Android の違い、共有できないときのダウンロード）、claude.ai 上と同じ条件（マイクなし・ZIP 保存）までを確かめます。画面のスクリーンショットは `e2e/out/` に出ます
+- `npm run e2e` は Chromium の疑似マイクに合成した歌声を流し、録音 → ノート → MIDI 書き出し → MIDI を読み直して照合、ファイル読み込み・ドロップ、5 分のテイク、ノートの修正と元に戻す、キーボード操作、スマホのスワイプ、ステレオ入力、AudioWorklet が使えないときの代替経路、遅れの自動測定（スピーカーの音を 120 ms 遅れて聞くループバックのマイクで測り、続けて録ったテイクのクリックが拍に合うこと。聞こえないマイク、途中でやめる）、スマホの共有ボタン（iPhone と Android の違い、共有できないときのダウンロード）、アプリとしてのインストール（Chrome のインストール判定、サーバーが止まった状態での起動、追加ボタン、戻る操作）、claude.ai 上と同じ条件（マイクなし・ZIP 保存）までを確かめます。画面のスクリーンショットは `e2e/out/` に出ます
 - `npm run eval` の結果（2026-11-14、合成音声 17 条件・各 17 音）:
 
 | 条件 | 正解 | F1 | 音の頭のずれ |
@@ -141,15 +146,17 @@ src/
   ui/                  ピアノロール（canvas）・つまみ
   synth/voice.ts       合成の歌声（サンプルとテスト用）
   app/files.ts         書き出しファイルと ZIP
+  pwa/sw.js            オフライン用の Service Worker（ビルドで版番号を入れる）
   body.html, styles.css
-scripts/               build（1 ファイルの HTML に）・dev サーバー・TypeScript の実行（run-ts.mjs：eval など）・評価データの取得・SwiftF0 の書き出し / カーネルのビルド
+scripts/               build（1 ファイルの HTML に。アプリとして入れるためのマニフェスト・Service Worker・アイコンも）・dev サーバー・アイコンの作成（make-icons.mjs）・TypeScript の実行（run-ts.mjs：eval など）・評価データの取得・SwiftF0 の書き出し / カーネルのビルド
+assets/                アプリのアイコン（scripts/make-icons.mjs で作成）
 tests/                 単体テスト（vitest）
 e2e/                   Chromium の通しテスト
 eval/                  合成音声での精度計測（eval.ts）と本物の声での評価（real.ts、real/）
 wasm/                  SwiftF0 の畳み込みカーネル（AssemblyScript）
 ```
 
-`npm run build` で `dist/index.html`（そのまま開ける 1 ファイル）と `dist/artifact.html`（claude.ai 用）ができます。GitHub Pages には `.github/workflows/pages.yml` が、型チェックと単体テストのあとに `dist/index.html` を出します（リポジトリの Settings → Pages → Source を「GitHub Actions」にしておく）。
+`npm run build` で `dist/index.html`（そのまま開ける 1 ファイル）と `dist/artifact.html`（claude.ai 用）、アプリとして入れるための `manifest.webmanifest`・`sw.js`・アイコンができます。GitHub Pages には `.github/workflows/pages.yml` が、型チェックと単体テストのあとにこれら（claude.ai 用を除く）を出します（リポジトリの Settings → Pages → Source を「GitHub Actions」にしておく）。
 
 ## 使っているもの
 

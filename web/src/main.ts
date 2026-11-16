@@ -99,6 +99,10 @@ function monoBuffer(length: number, sampleRate: number): AudioBuffer {
   return new AudioBuffer({ length: Math.max(1, length), sampleRate, numberOfChannels: 1 });
 }
 
+interface InstallPromptEvent extends Event {
+  prompt(): Promise<unknown>;
+}
+
 interface Snapshot {
   fixed: Record<string, number>;
   deleted: string[];
@@ -220,6 +224,8 @@ const S = {
 
 let ctx: AudioContext | null = null;
 let player: Player | null = null;
+/** The browser's install prompt (Chrome on Android and computers), kept for the button in the settings. */
+let installPrompt: InstallPromptEvent | null = null;
 /** The take just recorded, shown in the roll while its analysis runs. */
 let recorded: Rec | null = null;
 /** Name of the take being loaded (shown as the title meanwhile). */
@@ -292,6 +298,8 @@ const el = {
   btnMeasure: $<HTMLButtonElement>('btn-measure'),
   latencyNote: $('latency-note'),
   btnSample: $<HTMLButtonElement>('btn-sample'),
+  fieldInstall: $('field-install'),
+  btnInstall: $<HTMLButtonElement>('btn-install'),
   measure: $('measure'),
   exportSheet: $('export'),
   exportName: $<HTMLInputElement>('export-name'),
@@ -1541,23 +1549,58 @@ gridChip.addEventListener('click', () => {
 
 let openSheet: HTMLElement | null = null;
 let sheetReturn: HTMLElement | null = null;
+/**
+ * An open sheet holds one history entry, so the back button (Android's back gesture, above all in the installed
+ * app) closes the sheet instead of leaving the app. Not inside a frame (the claude.ai viewer), whose history is
+ * the host page's.
+ */
+const sheetHistory = !framed();
+let sheetEntry = false;
+/** history.back() calls of our own whose popstate is still to come. */
+let ownBacks = 0;
 
 function showSheet(sheet: HTMLElement): void {
-  if (openSheet) closeSheet();
+  if (openSheet) hideSheet();
   sheetReturn = document.activeElement as HTMLElement | null;
   openSheet = sheet;
   el.backdrop.hidden = false;
   sheet.hidden = false;
+  if (sheetHistory && !sheetEntry) {
+    history.pushState({ sheet: true }, '');
+    sheetEntry = true;
+  }
   (sheet.querySelector('button.close') as HTMLButtonElement | null)?.focus();
 }
 
 function closeSheet(): void {
+  if (!openSheet) return;
+  hideSheet();
+  if (sheetEntry) {
+    sheetEntry = false;
+    ownBacks++;
+    history.back();
+  }
+}
+
+function hideSheet(): void {
   if (!openSheet) return;
   openSheet.hidden = true;
   el.backdrop.hidden = true;
   openSheet = null;
   sheetReturn?.focus();
 }
+
+window.addEventListener('popstate', () => {
+  if (ownBacks > 0) {
+    ownBacks--;
+    return;
+  }
+  // The back button: close the sheet its entry belonged to.
+  if (sheetEntry) {
+    sheetEntry = false;
+    hideSheet();
+  }
+});
 
 function renderSettings(): void {
   if (el.settings.hidden) return;
@@ -1571,6 +1614,7 @@ function renderSettings(): void {
     }
   }
   el.btnSample.disabled = !idle;
+  el.fieldInstall.hidden = !installPrompt;
   const measuring = S.phase === 'measuring';
   el.latency.value = String(P.latencyMs);
   el.latency.disabled = !idle;
@@ -1992,6 +2036,35 @@ function trapFocus(e: KeyboardEvent, root: HTMLElement): void {
     first.focus();
   }
 }
+
+// ---------------------------------------------------------------- installed app
+
+// The standalone page (it links a manifest) can be installed, and then opens offline through its service worker.
+// The claude.ai artifact and the dev server have no manifest and register nothing.
+if (document.querySelector('link[rel="manifest"]')) {
+  navigator.serviceWorker?.register('sw.js').catch(() => {
+    /* no offline copy: the page still works online */
+  });
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installPrompt = e as InstallPromptEvent;
+    renderSettings();
+  });
+  window.addEventListener('appinstalled', () => {
+    installPrompt = null;
+    renderSettings();
+  });
+}
+el.btnInstall.addEventListener('click', () => {
+  const prompt = installPrompt;
+  if (!prompt) return;
+  // The browser shows a prompt once per event.
+  installPrompt = null;
+  renderSettings();
+  prompt.prompt().catch(() => {
+    /* dismissed */
+  });
+});
 
 // ---------------------------------------------------------------- test hook (read by the E2E run)
 
