@@ -12,7 +12,7 @@ const port = Number(process.env.PORT ?? 5173);
 
 async function rebuild() {
   try {
-    // No manifest or service worker here: a cached page would hide the changes being made.
+    // The page only: this server answers every path with it, so it has no manifest, service worker or icons to serve.
     await buildPages({ minify: false, pwa: false });
     console.log(`[${new Date().toLocaleTimeString()}] built`);
   } catch (e) {

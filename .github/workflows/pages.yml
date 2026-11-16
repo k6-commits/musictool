@@ -34,8 +34,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - name: Collect the site (the page, and the manifest, service worker and icons of the installed app)
-        run: mkdir -p ../site && cp dist/index.html dist/manifest.webmanifest dist/sw.js dist/*.png ../site/
+      - name: Collect the site (everything the build wrote except the claude.ai fragment)
+        run: cp -r dist ../site && rm ../site/artifact.html
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site

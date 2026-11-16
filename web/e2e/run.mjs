@@ -5,7 +5,8 @@
 //  - the ScriptProcessor fallback and a stereo input with the voice on one channel
 //  - the latency measurement: through a loopback microphone (then a take whose clicks must land on the beats),
 //    through one that does not hear the speakers, and stopped halfway; the share sheet on iPhone and Android
-//  - the installable app: Chrome's installability check, the offline start, the install button, the back button
+//  - the installable app: Chrome's installability check, the offline start, error pages, the install button, sheets
+//    on close requests, the exit warning for an unsaved take on a phone, a sandboxed frame
 //  - the synth envelope and lazy note scheduling (OfflineAudioContext)
 // Needs Playwright with Chromium: `npm i -D playwright && npx playwright install chromium`.
 import { build } from 'esbuild';
@@ -48,30 +49,37 @@ await writeFile(filePath, fileWav(44100));
 await writeFile(longPath, longWav(16000, 300));
 
 const html = await readFile(join(root, 'dist/index.html'));
-// The installed app's files next to the page, as GitHub Pages serves them. While `serverDown` is set, page and app
-// requests fail as they would with no network.
-const appFiles = { '/manifest.webmanifest': ['application/manifest+json', 'dist/manifest.webmanifest'], '/sw.js': ['text/javascript; charset=utf-8', 'dist/sw.js'] };
-for (const icon of ['icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png']) appFiles[`/${icon}`] = ['image/png', `dist/${icon}`];
-for (const f of Object.values(appFiles)) f[1] = await readFile(join(root, f[1]));
+// The claude.ai fragment in the document the viewer wraps it in.
+const artifactHtml = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>${await readFile(join(root, 'dist/artifact.html'), 'utf8')}</body></html>`;
+// The site as GitHub Pages serves it: the page and the files the build wrote next to it, 404 for anything else.
+// While `serverDown` is set every request fails as with no network; `pageStatus` makes the page answer an error.
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.webmanifest': 'application/manifest+json', '.png': 'image/png' };
 let serverDown = false;
-// "/frame" embeds the app cross-origin (localhost -> 127.0.0.1) like the claude.ai viewer, without microphone access.
-const frameHtml = (port) =>
-  `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style><iframe src="http://127.0.0.1:${port}/"></iframe>`;
-const server = createServer((req, res) => {
+let pageStatus = 200;
+// "/frame" embeds the claude.ai fragment cross-origin (localhost -> 127.0.0.1) like the viewer, without microphone
+// access; "/sandboxed" embeds the standalone page in a sandbox without allow-same-origin.
+const frameHtml = (src, sandbox = '') =>
+  `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style><iframe src="${src}"${sandbox ? ` sandbox="${sandbox}"` : ''}></iframe>`;
+const server = createServer(async (req, res) => {
   if (serverDown) {
     req.socket.destroy();
     return;
   }
-  const file = appFiles[req.url.split('?')[0]];
-  if (file) {
-    res.writeHead(200, { 'content-type': file[0] });
-    res.end(file[1]);
-    return;
-  }
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-  if (req.url === '/frame') res.end(frameHtml(server.address().port));
-  else if (req.url === '/probe') res.end(`<!doctype html><meta charset="utf-8"><script>${probeJs}</script>`);
-  else res.end(html);
+  const send = (status, type, body) => {
+    res.writeHead(status, { 'content-type': type });
+    res.end(body);
+  };
+  const path = req.url.split('?')[0];
+  const other = `http://127.0.0.1:${server.address().port}`;
+  if (path === '/frame') return send(200, TYPES['.html'], frameHtml(`${other}/artifact`));
+  if (path === '/sandboxed') return send(200, TYPES['.html'], frameHtml(`${other}/`, 'allow-scripts'));
+  if (path === '/artifact') return send(200, TYPES['.html'], artifactHtml);
+  if (path === '/probe') return send(200, TYPES['.html'], `<!doctype html><meta charset="utf-8"><script>${probeJs}</script>`);
+  if (path === '/' || path === '/index.html') return send(pageStatus, TYPES['.html'], pageStatus === 200 ? html : 'Service Unavailable');
+  const type = TYPES[path.slice(path.lastIndexOf('.'))];
+  const file = type && /^\/[\w.-]+$/.test(path) && path !== '/artifact.html' ? await readFile(join(root, 'dist', path)).catch(() => null) : null;
+  if (file) send(200, type, file);
+  else send(404, 'text/plain; charset=utf-8', 'Not Found');
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const url = `http://localhost:${server.address().port}/`;
@@ -169,6 +177,13 @@ async function newApp(browser, options = {}, initScript = null) {
   await page.waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle');
   return { context, page };
 }
+
+/** Wait until the app has loaded and analyzed its sample (true), or `timeout` ms have passed (false). */
+const sampleReady = (target, timeout = 30000) =>
+  target.waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle', null, { timeout }).then(
+    () => true,
+    () => false,
+  );
 
 async function recordTake(page, ms) {
   await page.click('#btn-rec');
@@ -473,7 +488,14 @@ try {
   await touch('touchStart', box.x + box.width - 30);
   for (let i = 1; i <= 10; i++) await touch('touchMove', box.x + box.width - 30 - i * 18);
   await touch('touchEnd');
-  await phone.page.waitForTimeout(400);
+  // Wait for the fling to end: a tap while it runs only stops the scrolling.
+  await phone.page
+    .waitForFunction(() => new Promise((resolve) => {
+      const scroller = document.querySelector('.scroller');
+      const before = scroller.scrollLeft;
+      setTimeout(() => resolve(scroller.scrollLeft === before), 250);
+    }), null, { timeout: 5000 })
+    .catch(() => {});
   const scrolled = await phone.page.evaluate(() => document.querySelector('.scroller').scrollLeft);
   const afterSwipe = await counter(phone.page);
   await phone.page.touchscreen.tap(box.x + box.width / 2, box.y + box.height - 70);
@@ -512,28 +534,30 @@ try {
   check('Android: 共有 only for the voice .wav (its share sheet refuses .mid)', !androidShare.both && !androidShare.midi && androidShare.wav, JSON.stringify(androidShare));
   await android.context.close();
 
-  // ---- the installable app on Android: Chrome's own check, the offline start, the install button, the back button
+  // ---- the installable app on Android: Chrome's own check, the offline start, error pages, the install button,
+  // sheets on close requests without history entries, the build in the settings
   const pwa = await newApp(browser, { ...devices['Pixel 7'], deviceScaleFactor: 1 });
-  await pwa.page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
+  const swActive = await pwa.page.evaluate(() => Promise.race([navigator.serviceWorker.ready.then(() => true), new Promise((r) => setTimeout(() => r(false), 15000))]));
   // Reloaded, the page is under the service worker's control.
   await pwa.page.reload();
-  await pwa.page.waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle');
+  const controlled = (await sampleReady(pwa.page)) && (await pwa.page.evaluate(() => !!navigator.serviceWorker.controller));
   const pwaCdp = await pwa.context.newCDPSession(pwa.page);
   const { installabilityErrors } = await pwaCdp.send('Page.getInstallabilityErrors');
   const appManifest = await pwaCdp.send('Page.getAppManifest');
-  check('installable: Chrome reports no installability errors and a clean manifest', installabilityErrors.length === 0 && appManifest.errors.length === 0, JSON.stringify({ installabilityErrors, errors: appManifest.errors }));
-  const controlled = await pwa.page.evaluate(() => !!navigator.serviceWorker.controller);
+  check('installable: the worker takes over, Chrome reports no installability errors and a clean manifest', swActive && controlled && installabilityErrors.length === 0 && appManifest.errors.length === 0, JSON.stringify({ swActive, controlled, installabilityErrors, errors: appManifest.errors }));
+  // Another file of the site opened in the tab does not replace the app; then with no network the app still opens.
+  await pwa.page.goto(`${url}sw.js`);
   serverDown = true;
-  await pwa.context.setOffline(true);
-  await pwa.page.reload();
-  const offlineOk = await pwa.page
-    .waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle', null, { timeout: 20000 })
-    .then(() => true, () => false);
+  const offlineOk = await pwa.page.goto(url).then(() => sampleReady(pwa.page, 20000), () => false);
   const offlineNotes = offlineOk ? (await pwa.page.evaluate(() => window.__mt.notes())).length : 0;
-  await pwa.context.setOffline(false);
   serverDown = false;
-  check('offline: the app opens from the service worker and analyzes the sample', controlled && offlineOk && offlineNotes === 12, `controlled ${controlled}, opened ${offlineOk}, ${offlineNotes} notes`);
-  // The browser's install prompt arrives as an event; the settings offer it once.
+  check('offline: the app opens from the service worker (another site file opened before) and analyzes the sample', offlineOk && offlineNotes === 12, `opened ${offlineOk}, ${offlineNotes} notes`);
+  pageStatus = 503;
+  const errorOk = await pwa.page.reload().then(() => sampleReady(pwa.page, 20000), () => false);
+  pageStatus = 200;
+  check('a server error does not replace the installed app', errorOk);
+  // The browser's install prompt arrives as an event; the settings offer it once and keep the focus in the sheet.
+  const historyLength = await pwa.page.evaluate(() => history.length);
   await pwa.page.evaluate(() => {
     const e = new Event('beforeinstallprompt', { cancelable: true });
     e.prompt = async () => {
@@ -544,19 +568,64 @@ try {
   });
   await pwa.page.click('#btn-settings');
   const installShown = await pwa.page.isVisible('#btn-install');
-  await pwa.page.click('#btn-install');
-  check('the install button shows the browser prompt once', installShown && (await pwa.page.evaluate(() => window.__prompted)) === 1 && (await pwa.page.isHidden('#field-install')));
-  // Back (Android's back gesture) closes the open sheet and stays in the app; closing a sheet drops its entry.
-  await pwa.page.evaluate(() => history.back());
-  await pwa.page.waitForSelector('#settings', { state: 'hidden', timeout: 3000 }).catch(() => {});
-  const backClosed = (await pwa.page.isHidden('#settings')) && (await pwa.page.evaluate(() => !!window.__mt && history.state === null));
-  await pwa.page.click('#btn-export');
+  await pwa.page.focus('#btn-install');
+  await pwa.page.keyboard.press('Enter');
+  const afterInstall = await pwa.page.evaluate(() => ({ prompted: window.__prompted, rowHidden: document.querySelector('#field-install').hidden, focusInSheet: !!document.activeElement?.closest('#settings') }));
+  check('the install button shows the browser prompt once and keeps the focus in the sheet', installShown && afterInstall.prompted === 1 && afterInstall.rowHidden && afterInstall.focusInSheet, JSON.stringify(afterInstall));
+  const build = await pwa.page.evaluate(() => [...document.querySelectorAll('#measure dt')].find((dt) => dt.textContent === '版')?.nextElementSibling?.textContent ?? '');
+  check('the settings show the build', /^([0-9a-f]{7,}\+?|dev)$/.test(build), build);
+  // Esc is a close request, as the back gesture on Android: the sheets close through their close watchers.
+  const watchers = await pwa.page.evaluate(() => typeof CloseWatcher === 'function');
   await pwa.page.keyboard.press('Escape');
-  await pwa.page.waitForFunction(() => history.state === null, null, { timeout: 3000 }).catch(() => {});
-  const escapeDropped = await pwa.page.evaluate(() => history.state === null);
-  check('back closes the open sheet and stays in the app; a closed sheet leaves no history entry', backClosed && escapeDropped, `back ${backClosed}, escape ${escapeDropped}`);
+  const settingsClosed = await pwa.page.isHidden('#settings');
+  await pwa.page.click('#btn-export');
+  const exportOpened = await pwa.page.isVisible('#export');
+  await pwa.page.keyboard.press('Escape');
+  const sheets = { watchers, settingsClosed, exportOpened, exportClosed: await pwa.page.isHidden('#export'), historyAdded: (await pwa.page.evaluate(() => history.length)) - historyLength };
+  check('sheets close on a close request and leave no history entries', Object.values(sheets).every((v) => v === true || v === 0), JSON.stringify(sheets));
   check('no page errors (installable app)', pwa.page.errors.length === 0, pwa.page.errors.join(' | '));
   await pwa.context.close();
+
+  // ---- on a phone, back on the main screen warns once while a recorded take is not saved; sheets come first
+  const guard = await newApp(browser, { ...devices['Pixel 7'], deviceScaleFactor: 1 });
+  await guard.page.fill('#bpm', '100');
+  await guard.page.press('#bpm', 'Enter');
+  await recordTake(guard.page, 3000);
+  const toastShown = async () => {
+    await guard.page.waitForTimeout(150);
+    return guard.page.evaluate(() => (document.querySelector('#toast').hidden ? '' : document.querySelector('#toast').textContent));
+  };
+  const toastGone = () => guard.page.waitForFunction(() => document.querySelector('#toast').hidden, null, { timeout: 6000 }).catch(() => {});
+  await toastGone();
+  await guard.page.keyboard.press('Escape');
+  const firstBack = await toastShown();
+  await toastGone();
+  await guard.page.keyboard.press('Escape');
+  const secondBack = await toastShown();
+  await guard.page.click('#btn-settings');
+  await guard.page.keyboard.press('Escape');
+  const sheetFirst = (await guard.page.isHidden('#settings')) && (await toastShown()) === '';
+  await guard.page.keyboard.press('Escape');
+  const rearmed = await toastShown();
+  await toastGone();
+  await guard.page.click('#btn-export');
+  await guard.page.click('.tile[data-kind="midi"]');
+  await Promise.all([guard.page.waitForEvent('download'), guard.page.click('#btn-download')]);
+  await toastGone();
+  await guard.page.keyboard.press('Escape');
+  const afterSave = await toastShown();
+  const guardState = { firstBack, secondBack, sheetFirst, rearmed, afterSave };
+  check('unsaved take: the first back warns, the next leaves, a sheet closes first, saving ends the warning', /もう一度戻ると閉じます/.test(firstBack) && secondBack === '' && sheetFirst && /もう一度戻ると閉じます/.test(rearmed) && afterSave === '', JSON.stringify(guardState));
+  check('no page errors (exit guard)', guard.page.errors.length === 0, guard.page.errors.join(' | '));
+  await guard.context.close();
+
+  // ---- the standalone page in a sandboxed frame (no service worker, no storage there) still starts
+  const sandboxed = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+  const sp = await sandboxed.newPage();
+  await sp.goto(`${url}sandboxed`);
+  const inner = await (await sp.waitForSelector('iframe')).contentFrame();
+  check('the page starts in a sandboxed frame', await sampleReady(inner));
+  await sandboxed.close();
 
   // ---- AudioWorklet unavailable: the ScriptProcessor fallback keeps the timeline
   const fallback = await newApp(browser, {}, () => {
@@ -617,7 +686,7 @@ try {
   check('no page errors (measurement)', deaf.page.errors.length === 0, deaf.page.errors.join(' | '));
   await deaf.context.close();
 
-  // ---- claude.ai artifact mode: no microphone, files are saved through the viewer as .zip
+  // ---- claude.ai artifact mode (the fragment the viewer shows): no microphone, files are saved through the viewer as .zip
   const art = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
   await art.addInitScript(() => {
     window.claude = {
@@ -630,8 +699,8 @@ try {
   ap.on('pageerror', (e) => artErrors.push(e.message));
   await ap.goto(`${url}frame`);
   const app = ap.frames().find((f) => f !== ap.mainFrame()) ?? (await (await ap.waitForSelector('iframe')).contentFrame());
-  await app.waitForFunction(() => window.__mt?.take()?.source === 'sample' && window.__mt.phase === 'idle');
-  check('artifact mode hides REC and highlights "open file"', (await app.isHidden('#btn-rec')) && (await app.getAttribute('#btn-open', 'class')).includes('accent'));
+  await sampleReady(app);
+  check('artifact mode (no manifest, no service worker) hides REC and highlights "open file"', !(await app.evaluate(() => !!document.querySelector('link[rel="manifest"]') || !!navigator.serviceWorker?.controller)) && (await app.isHidden('#btn-rec')) && (await app.getAttribute('#btn-open', 'class')).includes('accent'));
   await app.setInputFiles('#file', filePath);
   await app.waitForFunction(() => window.__mt.take()?.source === 'file' && window.__mt.phase === 'idle', null, { timeout: 20000 });
   await app.click('#btn-export');
