@@ -12,7 +12,8 @@ const port = Number(process.env.PORT ?? 5173);
 
 async function rebuild() {
   try {
-    await buildPages({ minify: false });
+    // The page only: this server answers every path with it, so it has no manifest, service worker or icons to serve.
+    await buildPages({ minify: false, pwa: false });
     console.log(`[${new Date().toLocaleTimeString()}] built`);
   } catch (e) {
     console.error(e.message ?? e);

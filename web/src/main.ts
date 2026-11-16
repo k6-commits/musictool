@@ -1,4 +1,6 @@
 // musictool prototype: sing (or open a recording) -> pitch -> notes -> edit -> MIDI.
+/** The commit the page was built from (scripts/build.mjs), shown in the settings. */
+declare const __BUILD__: string;
 import { asFiles, buildFiles, canShareFiles, packageFiles, safeName, saveWithLink, shareRefusesMidi, type ExportKind, type OutFile } from './app/files';
 import { MicCapture, TakeRecorder } from './audio/capture';
 import { measureLatency, reportedLatency } from './audio/latency';
@@ -97,6 +99,10 @@ function samples(t: Take): Float32Array {
 
 function monoBuffer(length: number, sampleRate: number): AudioBuffer {
   return new AudioBuffer({ length: Math.max(1, length), sampleRate, numberOfChannels: 1 });
+}
+
+interface InstallPromptEvent extends Event {
+  prompt(): Promise<unknown>;
 }
 
 interface Snapshot {
@@ -216,10 +222,14 @@ const S = {
   latencyNote: null as { text: string; tone: '' | 'ok' | 'warn' } | null,
   /** Shown once per session: the hint to measure, and the note that the microphone differs from the measured one. */
   hinted: new Set<string>(),
+  /** Whether the take has been exported or shared since it was recorded or last edited (always true for files). */
+  saved: true,
 };
 
 let ctx: AudioContext | null = null;
 let player: Player | null = null;
+/** The browser's install prompt (Chrome on Android and computers), kept for the button in the settings. */
+let installPrompt: InstallPromptEvent | null = null;
 /** The take just recorded, shown in the roll while its analysis runs. */
 let recorded: Rec | null = null;
 /** Name of the take being loaded (shown as the title meanwhile). */
@@ -292,6 +302,8 @@ const el = {
   btnMeasure: $<HTMLButtonElement>('btn-measure'),
   latencyNote: $('latency-note'),
   btnSample: $<HTMLButtonElement>('btn-sample'),
+  fieldInstall: $('field-install'),
+  btnInstall: $<HTMLButtonElement>('btn-install'),
   measure: $('measure'),
   exportSheet: $('export'),
   exportName: $<HTMLInputElement>('export-name'),
@@ -361,6 +373,7 @@ function snapshot(): Snapshot {
 
 /** Record an undo step. Rapid changes from the same control collapse into one step. */
 function pushUndo(tag: string): void {
+  edited();
   const now = performance.now();
   if (tag && tag === S.undoTag && now - S.undoAt < 1200) {
     S.undoAt = now;
@@ -376,6 +389,7 @@ function undo(): void {
   if (S.phase !== 'idle') return;
   const s = S.undo.pop();
   if (!s) return;
+  edited();
   S.fixed = s.fixed;
   S.deleted = new Set(s.deleted);
   S.snap = s.snap;
@@ -558,6 +572,7 @@ async function loadTake(input: TakeInput): Promise<void> {
       if (p < lo) lo = p;
       if (p > hi) hi = p;
     }
+    S.saved = input.source !== 'mic';
     S.take = {
       name: input.name,
       source: input.source,
@@ -604,6 +619,7 @@ async function loadTake(input: TakeInput): Promise<void> {
     el.busy.hidden = true;
   }
   refresh();
+  guardExit();
   loop();
 }
 
@@ -1539,24 +1555,97 @@ gridChip.addEventListener('click', () => {
 
 // ---------------------------------------------------------------- sheets
 
+/** A close watcher (Chrome 120 and later): Android's back gesture and the Esc key send it a close request. */
+interface CloseWatcherLike {
+  onclose: (() => void) | null;
+  destroy(): void;
+  requestClose(): void;
+}
+const CloseWatcherCtor = (window as unknown as { CloseWatcher?: new () => CloseWatcherLike }).CloseWatcher;
+
+/** A close watcher calling `onclose`, or null where the browser has none or refuses one. */
+function watchClose(onclose: () => void): CloseWatcherLike | null {
+  if (!CloseWatcherCtor) return null;
+  try {
+    const watcher = new CloseWatcherCtor();
+    watcher.onclose = onclose;
+    return watcher;
+  } catch {
+    return null;
+  }
+}
+
 let openSheet: HTMLElement | null = null;
 let sheetReturn: HTMLElement | null = null;
+/**
+ * The open sheet's close watcher: the back gesture closes the sheet instead of leaving the app. It touches no
+ * history, so nothing is left behind by a reload, a restored app or a sheet opened while another closes.
+ */
+let sheetWatcher: CloseWatcherLike | null = null;
 
 function showSheet(sheet: HTMLElement): void {
-  if (openSheet) closeSheet();
+  // Switching sheets in one action: no exit guard in between (it would share the new sheet's close watcher).
+  if (openSheet) hideSheet();
   sheetReturn = document.activeElement as HTMLElement | null;
   openSheet = sheet;
   el.backdrop.hidden = false;
   sheet.hidden = false;
+  const watcher = watchClose(() => {
+    if (sheetWatcher === watcher) closeSheet();
+  });
+  sheetWatcher = watcher;
   (sheet.querySelector('button.close') as HTMLButtonElement | null)?.focus();
 }
 
 function closeSheet(): void {
   if (!openSheet) return;
+  hideSheet();
+  guardExit();
+}
+
+function hideSheet(): void {
+  if (!openSheet) return;
+  const watcher = sheetWatcher;
+  sheetWatcher = null;
+  watcher?.destroy();
   openSheet.hidden = true;
   el.backdrop.hidden = true;
   openSheet = null;
   sheetReturn?.focus();
+}
+
+/**
+ * On a phone, while a recorded take has not been exported or shared since it was recorded or edited, the back
+ * gesture on the main screen first warns instead of closing the app (which would lose the take; the installed app
+ * gets no beforeunload there). One warning per arming: the next back leaves. Armed when a take loads, after edits
+ * and when a sheet closes; never while a sheet is open, so the sheet's own watcher stays the one back reaches first.
+ */
+let exitWatcher: CloseWatcherLike | null = null;
+
+function guardExit(): void {
+  if (S.saved || S.take?.source !== 'mic' || !matchMedia('(pointer: coarse)').matches) {
+    exitWatcher?.destroy();
+    exitWatcher = null;
+    return;
+  }
+  if (exitWatcher || openSheet) return;
+  exitWatcher = watchClose(() => {
+    exitWatcher = null;
+    toast('書き出していない録音があります。もう一度戻ると閉じます', 'warn');
+  });
+}
+
+/** An edit to the take: it needs saving again. */
+function edited(): void {
+  if (S.take?.source !== 'mic') return;
+  S.saved = false;
+  guardExit();
+}
+
+/** The take went out of the app (a download, the claude.ai viewer's save, the share sheet). */
+function takeSaved(): void {
+  S.saved = true;
+  guardExit();
 }
 
 function renderSettings(): void {
@@ -1571,6 +1660,7 @@ function renderSettings(): void {
     }
   }
   el.btnSample.disabled = !idle;
+  el.fieldInstall.hidden = !installPrompt;
   const measuring = S.phase === 'measuring';
   el.latency.value = String(P.latencyMs);
   el.latency.disabled = !idle;
@@ -1609,6 +1699,7 @@ function renderMeasure(): void {
     const m = P.measured;
     rows.push(['実測', `${m.ms} ms（${m.heard}/${m.covered} 回、ばらつき ${m.spreadMs.toFixed(1)} ms）`]);
   }
+  rows.push(['版', __BUILD__]);
   el.measure.innerHTML = '';
   for (const [k, v] of rows) {
     const dt = document.createElement('dt');
@@ -1673,6 +1764,7 @@ function download(name: string, files: OutFile[]): string {
   const out = packageFiles(files, name, false);
   lastExport = { filename: out.name, files: files.map((f) => ({ name: f.name, size: f.data.length })) };
   saveWithLink(out);
+  takeSaved();
   closeSheet();
   toast(`${out.name} を書き出しました`, 'ok');
   return out.name;
@@ -1697,7 +1789,10 @@ async function doExport(): Promise<void> {
   try {
     const res = await dl.save({ filename: out.name, data: new Blob([out.data as BlobPart]) });
     closeSheet();
-    if (res.status === 'saved') toast(`${out.name} を保存しました`, 'ok');
+    if (res.status === 'saved') {
+      takeSaved();
+      toast(`${out.name} を保存しました`, 'ok');
+    }
   } catch (e) {
     const code = (e as { code?: string })?.code;
     if (code === 'declined') return;
@@ -1713,6 +1808,7 @@ async function doShare(): Promise<void> {
   if (!built) return;
   try {
     await navigator.share({ files: asFiles(built.files) });
+    takeSaved();
     closeSheet();
   } catch (e) {
     if ((e as { name?: string })?.name === 'AbortError') return;
@@ -1924,8 +2020,10 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
-    if (openSheet) closeSheet();
-    else if (S.selected) select(null);
+    // A sheet with a close watcher gets Esc from the browser as a close request.
+    if (openSheet) {
+      if (!sheetWatcher) closeSheet();
+    } else if (S.selected) select(null);
     return;
   }
   if (openSheet) {
@@ -1992,6 +2090,69 @@ function trapFocus(e: KeyboardEvent, root: HTMLElement): void {
     first.focus();
   }
 }
+
+// ---------------------------------------------------------------- installed app
+
+/**
+ * The service worker (src/pwa/sw.js) keeps the app for offline starts. A new version installs in the background
+ * when the app is opened (or brought back after a while) and takes over: say so, since it shows from the next start.
+ */
+function registerServiceWorker(): void {
+  let container: ServiceWorkerContainer | undefined;
+  try {
+    // Reading it throws in a sandboxed (opaque-origin) frame.
+    container = navigator.serviceWorker;
+  } catch {
+    return;
+  }
+  if (!container) return;
+  let hadController = !!container.controller;
+  container.addEventListener('controllerchange', () => {
+    // The first install takes control too, with nothing to announce.
+    if (hadController) toast('新しい版を取り込みました。アプリを開き直すと切り替わります', 'ok');
+    hadController = true;
+  });
+  container.register('sw.js').then(
+    (registration) => {
+      // The installed app is often brought back rather than reopened, which checks for nothing by itself.
+      let checked = Date.now();
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible' || Date.now() - checked < 10 * 60 * 1000) return;
+        checked = Date.now();
+        registration.update().catch(() => {});
+      });
+    },
+    () => {
+      /* no offline copy: the page still works online */
+    },
+  );
+}
+
+// The standalone page (it links a manifest) can be installed, and then opens offline through its service worker.
+// The claude.ai artifact and the dev server have no manifest and register nothing.
+if (document.querySelector('link[rel="manifest"]')) {
+  registerServiceWorker();
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installPrompt = e as InstallPromptEvent;
+    renderSettings();
+  });
+  window.addEventListener('appinstalled', () => {
+    installPrompt = null;
+    renderSettings();
+  });
+}
+el.btnInstall.addEventListener('click', () => {
+  const prompt = installPrompt;
+  if (!prompt) return;
+  // The browser shows a prompt once per event. The row goes away: keep the focus inside the sheet.
+  installPrompt = null;
+  (el.settings.querySelector('button.close') as HTMLButtonElement | null)?.focus();
+  renderSettings();
+  prompt.prompt().catch(() => {
+    /* dismissed */
+  });
+});
 
 // ---------------------------------------------------------------- test hook (read by the E2E run)
 
